@@ -91,6 +91,55 @@ def imread_cv2(path, options=cv2.IMREAD_COLOR):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     return img
 
+def imreadlowlight_cv2(path, options=cv2.IMREAD_COLOR, brightness_factor=1.0, gamma=1.0, noise_std=0.0, as_uint8=False):
+    """ Open an image or a depthmap with opencv-python, optionally applying low-light transformations.
+    
+    Args:
+        path (str): Path to the image file.
+        options (int): OpenCV imread flags (default: cv2.IMREAD_COLOR).
+        brightness_factor (float): Brightness scaling factor (1.0 = no change, <1.0 = dimmer).
+        gamma (float): Gamma correction value (1.0 = no change, >1.0 = darker).
+        noise_std (float): Standard deviation of Gaussian noise (0.0 = no noise).
+        as_uint8 (bool): If True, return uint8 array in [0, 255]; else float32 in [0, 1].
+    
+    Returns:
+        np.ndarray: Loaded and transformed image (RGB, either uint8 [0, 255] or float32 [0, 1]).
+    """
+    if path.endswith(('.exr', '.EXR')):
+        options = cv2.IMREAD_ANYDEPTH
+    img = cv2.imread(path, options)
+    if img is None:
+        raise IOError(f'Could not load image={path} with {options=}')
+    
+    # Convert to RGB if necessary
+    if img.ndim == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    
+    # Normalize to [0, 1] for transformations
+    if img.dtype == np.uint8:
+        img = img.astype(np.float32) / 255.0
+    elif img.dtype == np.float32 and img.max() > 1.0:
+        img = img / img.max()
+    
+    # Apply low-light transformations
+    if brightness_factor < 1.0:
+        img = img * brightness_factor
+        img = np.clip(img, 0.0, 1.0)
+    
+    if gamma != 1.0:
+        img = np.power(img, gamma)
+        img = np.clip(img, 0.0, 1.0)
+    
+    if noise_std > 0.0:
+        noise = np.random.normal(0, noise_std, img.shape)
+        img = img + noise
+        img = np.clip(img, 0.0, 1.0)
+    
+    # Convert to uint8 if requested (for PIL compatibility)
+    if as_uint8:
+        img = (img * 255.0).astype(np.uint8)
+    
+    return img
 
 def rgb(ftensor, true_shape=None):
     if isinstance(ftensor, list):

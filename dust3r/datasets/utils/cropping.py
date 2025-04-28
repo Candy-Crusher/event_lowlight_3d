@@ -53,22 +53,30 @@ class ImageList:
         return [getattr(im, func)(*args, **kwargs) for im in self.images]
 
 
-def rescale_image_depthmap(image, depthmap, camera_intrinsics, output_resolution, force=True):
+def rescale_image_depthmap(image, depthmap, camera_intrinsics, output_resolution, force=True, event_voxel=None):
     """ Jointly rescale a (image, depthmap) 
         so that (out_width, out_height) >= output_res
     """
     image = ImageList(image)
     input_resolution = np.array(image.size)  # (W,H)
     output_resolution = np.array(output_resolution)
+    
+    # Validate inputs
     if depthmap is not None:
         # can also use this with masks instead of depthmaps
-        assert tuple(depthmap.shape[:2]) == image.size[::-1]
+        assert tuple(depthmap.shape[:2]) == image.size[::-1], f"Depthmap shape {depthmap.shape[:2]} does not match image size {image.size[::-1]}"
+    if event_voxel is not None:
+        event_voxel = np.asarray(event_voxel)
+        if len(event_voxel.shape) < 3:
+            raise ValueError(f"event_voxel must have at least 3 dimensions, got shape {event_voxel.shape}")
+        if event_voxel.shape[1:] != image.size[::-1]:
+            raise ValueError(f"event_voxel spatial dimensions {event_voxel.shape[1:]} do not match image size {image.size[::-1]}")
 
     # define output resolution
     assert output_resolution.shape == (2,)
     scale_final = max(output_resolution / image.size) + 1e-8
     if scale_final >= 1 and not force:  # image is already smaller than what is asked
-        return (image.to_pil(), depthmap, camera_intrinsics)
+        return (image.to_pil(), depthmap, camera_intrinsics, event_voxel)
     output_resolution = np.floor(input_resolution * scale_final).astype(int)
 
     # first rescale the image so that it contains the crop
@@ -76,14 +84,23 @@ def rescale_image_depthmap(image, depthmap, camera_intrinsics, output_resolution
     if depthmap is not None:
         depthmap = cv2.resize(depthmap, output_resolution, fx=scale_final,
                               fy=scale_final, interpolation=cv2.INTER_NEAREST)
+    if event_voxel is not None:
+        C = event_voxel.shape[0]
+        resized_voxel = np.zeros((C, output_resolution[1], output_resolution[0]), dtype=event_voxel.dtype)
+        for c in range(C):
+            resized_voxel[c] = cv2.resize(event_voxel[c], output_resolution,
+                                         fx=scale_final, fy=scale_final,
+                                         interpolation=cv2.INTER_NEAREST)
+        event_voxel = resized_voxel
+    else:
+        event_voxel = None
 
     # no offset here; simple rescaling
     camera_intrinsics = camera_matrix_of_crop(
         camera_intrinsics, input_resolution, output_resolution, scaling=scale_final)
 
-    return image.to_pil(), depthmap, camera_intrinsics
-
-def center_crop_image_depthmap(image, depthmap, camera_intrinsics, crop_scale):
+    return image.to_pil(), depthmap, camera_intrinsics, event_voxel     
+def center_crop_image_depthmap(image, depthmap, camera_intrinsics, crop_scale, event_voxel=None):
     """
     Jointly center-crop an image and its depthmap, and adjust the camera intrinsics accordingly.
 
@@ -127,6 +144,10 @@ def center_crop_image_depthmap(image, depthmap, camera_intrinsics, crop_scale):
     image = image.crop(crop_bbox)
     if depthmap is not None:
         depthmap = depthmap[t:b, l:r]
+    if event_voxel is not None:
+        event_voxel = event_voxel[:, t:b, l:r]
+    else:
+        event_voxel = None
 
     # Adjust the camera intrinsics
     adjusted_intrinsics = camera_intrinsics.copy()
@@ -139,7 +160,7 @@ def center_crop_image_depthmap(image, depthmap, camera_intrinsics, crop_scale):
     adjusted_intrinsics[0, 2] -= l  # cx
     adjusted_intrinsics[1, 2] -= t  # cy
 
-    return image.to_pil(), depthmap, adjusted_intrinsics
+    return image.to_pil(), depthmap, adjusted_intrinsics, event_voxel
 
 
 
@@ -159,7 +180,7 @@ def camera_matrix_of_crop(input_camera_matrix, input_resolution, output_resoluti
     return output_camera_matrix
 
 
-def crop_image_depthmap(image, depthmap, camera_intrinsics, crop_bbox):
+def crop_image_depthmap(image, depthmap, camera_intrinsics, crop_bbox, event_voxel=None):
     """
     Return a crop of the input view.
     """
@@ -168,12 +189,16 @@ def crop_image_depthmap(image, depthmap, camera_intrinsics, crop_bbox):
 
     image = image.crop((l, t, r, b))
     depthmap = depthmap[t:b, l:r]
+    if event_voxel is not None:
+        event_voxel = event_voxel[:, t:b, l:r]
+    else:
+        event_voxel = None
 
     camera_intrinsics = camera_intrinsics.copy()
     camera_intrinsics[0, 2] -= l
     camera_intrinsics[1, 2] -= t
 
-    return image.to_pil(), depthmap, camera_intrinsics
+    return image.to_pil(), depthmap, camera_intrinsics, event_voxel
 
 
 def bbox_from_intrinsics_in_out(input_camera_matrix, output_camera_matrix, output_resolution):

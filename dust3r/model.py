@@ -2,10 +2,11 @@
 # Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
 #
 # --------------------------------------------------------
-# DUSt3R model class
+# DUSt3R model class with ControlNet-inspired event voxel control
 # --------------------------------------------------------
 from copy import deepcopy
 import torch
+import torch.nn as nn
 import os
 from packaging import version
 import huggingface_hub
@@ -49,9 +50,9 @@ class AsymmetricCroCo3DStereo (
     repo_url="https://github.com/junyi/monst3r",
     tags=["image-to-3d"],
 ):
-    """ Two siamese encoders, followed by two decoders.
+    """ Two siamese encoders, followed by two decoders with event voxel control.
     The goal is to output 3d points directly, both images in view1's frame
-    (hence the asymmetry).   
+    (hence the asymmetry). Event voxel data is used as a control signal.
     """
 
     def __init__(self,
@@ -62,8 +63,12 @@ class AsymmetricCroCo3DStereo (
                  freeze='none',
                  landscape_only=True,
                  patch_embed_cls='PatchEmbedDust3R',  # PatchEmbedDust3R or ManyAR_PatchEmbed
+                 use_event_control=False,  # Flag to enable event control
+                 event_in_channels=6,    # Event voxel input channels
                  **croco_kwargs):
         self.patch_embed_cls = patch_embed_cls
+        self.use_event_control = use_event_control
+        self.event_in_channels = event_in_channels
         self.croco_args = fill_default_args(croco_kwargs, super().__init__)
         super().__init__(**croco_kwargs)
 
@@ -72,6 +77,32 @@ class AsymmetricCroCo3DStereo (
         self.set_downstream_head(output_mode, head_type, landscape_only, depth_mode, conf_mode, **croco_kwargs)
         self.set_freeze(freeze)
 
+        # Event control initialization
+        if self.use_event_control:
+            self._init_event_control(croco_kwargs.get('img_size', 224), croco_kwargs.get('patch_size', 16),
+                                    croco_kwargs.get('enc_embed_dim', 768), croco_kwargs.get('dec_embed_dim', 768))
+    def zero_module(self, module):
+        for p in module.parameters():
+            nn.init.zeros_(p)
+        return module
+
+    def _init_event_control(self, img_size, patch_size, enc_embed_dim, dec_embed_dim):
+        """ Initialize modules for processing event voxel data and injecting it into the network. """
+        # embedding
+        # self.event_embed = nn.Sequential(
+        #     nn.Conv2d(self.event_in_channels, 32, kernel_size=3, padding=1),
+        #     nn.ReLU(),
+        #     nn.Conv2d(32, enc_embed_dim, kernel_size=3, padding=1),
+        #     nn.ReLU(),
+        #     nn.Conv2d(enc_embed_dim, enc_embed_dim, kernel_size=patch_size, stride=patch_size)  # Downsample to patch size
+        # )
+        self.event_embed = deepcopy(self.patch_embed)
+        self.event_embed.proj = nn.Conv2d(self.event_in_channels, enc_embed_dim, kernel_size=patch_size, stride=patch_size)
+        # Zero-convolution layers
+        self.enc_zero_conv_in = self.zero_module(nn.Conv1d(enc_embed_dim, enc_embed_dim, 1))
+        self.enc_zero_conv_out = self.zero_module(nn.Conv1d(enc_embed_dim, enc_embed_dim, 1))
+        # Trainable copy
+        self.enc_blocks_trainable = nn.ModuleList([deepcopy(blk) for blk in self.enc_blocks])
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kw):
@@ -99,6 +130,8 @@ class AsymmetricCroCo3DStereo (
             'mask':     [self.mask_token],
             'encoder':  [self.mask_token, self.patch_embed, self.enc_blocks],
             'encoder_and_decoder': [self.mask_token, self.patch_embed, self.enc_blocks, self.dec_blocks, self.dec_blocks2],
+            'all':     [self.mask_token, self.patch_embed, self.enc_blocks, self.dec_blocks, self.dec_blocks2,
+                        self.downstream_head1, self.downstream_head2]
         }
         freeze_all_params(to_be_frozen[freeze])
         print(f'Freezing {freeze} parameters')
@@ -124,36 +157,54 @@ class AsymmetricCroCo3DStereo (
         self.head1 = transpose_to_landscape(self.downstream_head1, activate=landscape_only)
         self.head2 = transpose_to_landscape(self.downstream_head2, activate=landscape_only)
 
-    def _encode_image(self, image, true_shape):
+    def _encode_image(self, image, true_shape, event_voxel=None):
         # embed the image into patches  (x has size B x Npatches x C)
         x, pos = self.patch_embed(image, true_shape=true_shape)
         # x (B, 576, 1024) pos (B, 576, 2); patch_size=16
         B,N,C = x.size()
         posvis = pos
+
+        # Process event voxel if provided
+        event_features = None
+        if self.use_event_control and event_voxel is not None:
+            # Event voxel shape: [B, 6, H, W]
+            c, _ = self.event_embed(event_voxel, true_shape=true_shape)
+            c_in = self.enc_zero_conv_in(c.transpose(1, 2)).transpose(1, 2) + x  # [B, N, enc_embed_dim]
         # add positional embedding without cls token
         assert self.enc_pos_embed is None
         # TODO: where to add mask for the patches
         # now apply the transformer encoder and normalization
-        for blk in self.enc_blocks:
+        # Apply transformer encoder blocks with event control
+        for i, blk in enumerate(self.enc_blocks):
             x = blk(x, posvis)
+            if self.use_event_control and event_voxel is not None:
+                c_in = self.enc_blocks_trainable[i](c_in, posvis)
+                if i==len(self.enc_blocks)-1:
+                    c_out = self.enc_zero_conv_out(c_in.transpose(1, 2)).transpose(1, 2)
+                    x = x + c_out
 
         x = self.enc_norm(x)
         return x, pos, None
 
-    def _encode_image_pairs(self, img1, img2, true_shape1, true_shape2):
+    def _encode_image_pairs(self, img1, img2, true_shape1, true_shape2, event_voxel1=None, event_voxel2=None):
         if img1.shape[-2:] == img2.shape[-2:]:
-            out, pos, _ = self._encode_image(torch.cat((img1, img2), dim=0),
-                                             torch.cat((true_shape1, true_shape2), dim=0))
+            out, pos, _ = self._encode_image(
+                torch.cat((img1, img2), dim=0),
+                torch.cat((true_shape1, true_shape2), dim=0),
+                torch.cat((event_voxel1, event_voxel2), dim=0) if event_voxel1 is not None else None
+            )
             out, out2 = out.chunk(2, dim=0)
             pos, pos2 = pos.chunk(2, dim=0)
         else:
-            out, pos, _ = self._encode_image(img1, true_shape1)
-            out2, pos2, _ = self._encode_image(img2, true_shape2)
+            out, pos, _ = self._encode_image(img1, true_shape1, event_voxel1)
+            out2, pos2, _ = self._encode_image(img2, true_shape2, event_voxel2)
         return out, out2, pos, pos2
 
     def _encode_symmetrized(self, view1, view2):
         img1 = view1['img']
         img2 = view2['img']
+        event_voxel1 = view1.get('event_voxel')
+        event_voxel2 = view2.get('event_voxel')
         B = img1.shape[0]
 
         # Recover true_shape when available, otherwise assume that the img shape is the true one
@@ -163,11 +214,17 @@ class AsymmetricCroCo3DStereo (
         # warning! maybe the images have different portrait/landscape orientations
         if is_symmetrized(view1, view2):
             # computing half of forward pass!'
-            feat1, feat2, pos1, pos2 = self._encode_image_pairs(img1[::2], img2[::2], shape1[::2], shape2[::2])
+            feat1, feat2, pos1, pos2 = self._encode_image_pairs(
+                img1[::2], img2[::2], shape1[::2], shape2[::2],
+                event_voxel1[::2] if event_voxel1 is not None else None,
+                event_voxel2[::2] if event_voxel2 is not None else None
+            )
             feat1, feat2 = interleave(feat1, feat2)
             pos1, pos2 = interleave(pos1, pos2)
         else:
-            feat1, feat2, pos1, pos2 = self._encode_image_pairs(img1, img2, shape1, shape2)
+            feat1, feat2, pos1, pos2 = self._encode_image_pairs(
+                img1, img2, shape1, shape2, event_voxel1, event_voxel2
+            )
 
         return (shape1, shape2), (feat1, feat2), (pos1, pos2)
 

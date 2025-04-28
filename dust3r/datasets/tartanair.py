@@ -8,7 +8,8 @@ import os.path as osp
 import glob
 
 from dust3r.datasets.base.base_stereo_view_dataset import BaseStereoViewDataset
-from dust3r.utils.image import imread_cv2
+from dust3r.utils.image import imread_cv2,imreadlowlight_cv2
+from dust3r.utils.event import read_voxel_hdf5
 from dust3r.utils.misc import get_stride_distribution
 
 np.random.seed(125)
@@ -35,7 +36,7 @@ def xyzqxqyqxqw_to_c2w(xyzqxqyqxqw):
 class TarTanAirDUSt3R(BaseStereoViewDataset):
     def __init__(self,
                  dataset_location='data/tartanair',
-                 dset='Hard',
+                 dset='train',
                  use_augs=False,
                  S=2,
                  strides=[8],
@@ -47,17 +48,24 @@ class TarTanAirDUSt3R(BaseStereoViewDataset):
                  **kwargs
                  ):
 
+        TRAIN_SCENCE = ['westerndesert', 'seasidetown', 'amusement', 'carwelding', 'seasonsforest', 'office2', 'japanesealley', 'ocean', 'abandonedfactory_night', 'endofworld', 'office', 'soulcity', 'oldtown', 'seasonsforest_winter', 'abandonedfactory']
+        TEST_SCENCE = ['hospital','gascola', 'neighborhood']
         print('loading tartanair dataset...')
         super().__init__(*args, **kwargs)
         self.dataset_label = 'tartanair'
         self.split = dset
+        if self.split == 'train':
+            self.data_split = TRAIN_SCENCE
+        elif self.split == 'test':
+            self.data_split = TEST_SCENCE
         self.S = S # number of frames
         self.verbose = verbose
 
         self.use_augs = use_augs
-        self.dset = dset
+        self.dset = 'Hard'
 
         self.rgb_paths = []
+        self.event_paths = []
         self.depth_paths = []
         self.normal_paths = []
         self.traj_paths = []
@@ -71,8 +79,9 @@ class TarTanAirDUSt3R(BaseStereoViewDataset):
         self.subdirs.append(os.path.join(dataset_location)) #'data/tartanair'
 
         for subdir in self.subdirs:
-            for seq in glob.glob(os.path.join(subdir, "*/", dset, "*/")):
-                self.sequences.append(seq)
+            for seq in glob.glob(os.path.join(subdir, "*/", self.dset, "*/")):
+                if seq.split('/')[-4] in self.data_split:
+                    self.sequences.append(seq)
 
         self.sequences = sorted(self.sequences)
         if self.verbose:
@@ -87,14 +96,16 @@ class TarTanAirDUSt3R(BaseStereoViewDataset):
                 print('seq', seq)
 
             rgb_path = os.path.join(seq, 'image_left')
+            event_voxel_path = os.path.join(seq, 'event_left', 'event_voxel_left')
             depth_path = os.path.join(seq, 'depth_left')
             caminfo_path = os.path.join(seq, 'pose_left.txt')
             caminfo = np.loadtxt(caminfo_path)
             
             for stride in strides:
-                for ii in range(0,len(os.listdir(rgb_path))-self.S*stride+1, clip_step):
+                for ii in range(0,len(os.listdir(rgb_path))-1-self.S*stride+1, clip_step):
                     full_idx = ii + np.arange(self.S)*stride
                     self.rgb_paths.append([os.path.join(rgb_path, '%06d_left.png' % idx) for idx in full_idx])
+                    self.event_paths.append([os.path.join(event_voxel_path, '%06d_%06d_event.hdf5' % (idx, idx + 1)) for idx in full_idx])
                     self.depth_paths.append([os.path.join(depth_path, '%06d_left_depth.npy' % idx) for idx in full_idx])
                     self.annotations.append(caminfo[full_idx])
                     self.full_idxs.append(full_idx)
@@ -142,6 +153,7 @@ class TarTanAirDUSt3R(BaseStereoViewDataset):
             resampled_idxs += np.random.choice(self.stride_idxs[stride], num_clips_each_stride[i], replace=False).tolist()
 
         self.rgb_paths = [self.rgb_paths[i] for i in resampled_idxs]
+        self.event_paths = [self.event_paths[i] for i in resampled_idxs]
         self.depth_paths = [self.depth_paths[i] for i in resampled_idxs]
         self.annotations = [self.annotations[i] for i in resampled_idxs]
         self.full_idxs = [self.full_idxs[i] for i in resampled_idxs]
@@ -153,6 +165,7 @@ class TarTanAirDUSt3R(BaseStereoViewDataset):
     def _get_views(self, index, resolution, rng):
 
         rgb_paths = self.rgb_paths[index]
+        event_paths = self.event_paths[index]
         depth_paths = self.depth_paths[index]
         full_idx = self.full_idxs[index]
         annotations = self.annotations[index]
@@ -160,6 +173,7 @@ class TarTanAirDUSt3R(BaseStereoViewDataset):
         views = []
         for i in range(2):
             impath = rgb_paths[i]
+            eventpath = event_paths[i]
             depthpath = depth_paths[i]
 
             # load camera params
@@ -167,14 +181,16 @@ class TarTanAirDUSt3R(BaseStereoViewDataset):
             # camera_pose = np.linalg.inv(camera_pose)
 
             # load image and depth
-            rgb_image = imread_cv2(impath)
+            # rgb_image = imread_cv2(impath)
+            rgb_image = imreadlowlight_cv2(impath, brightness_factor=0.5, gamma=1.5, noise_std=0.05, as_uint8=True)
+            event_voxel = read_voxel_hdf5(eventpath)    # 6 H W
             depthmap = depth_read(depthpath)
 
-            rgb_image, depthmap, intrinsics = self._crop_resize_if_necessary(
-                rgb_image, depthmap, self.intrinsics, resolution, rng=rng, info=impath)
-
+            rgb_image, depthmap, intrinsics, event_voxel = self._crop_resize_if_necessary(
+                rgb_image, depthmap, self.intrinsics, resolution, rng=rng, info=impath, event_voxel=event_voxel)
             views.append(dict(
                 img=rgb_image,
+                event_voxel=event_voxel,
                 depthmap=depthmap,
                 camera_pose=camera_pose,
                 camera_intrinsics=intrinsics,

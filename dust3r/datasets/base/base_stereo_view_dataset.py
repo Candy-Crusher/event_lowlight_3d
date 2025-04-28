@@ -94,6 +94,20 @@ class BaseStereoViewDataset (EasyDataset):
             view['true_shape'] = np.int32((height, width))
             view['img'] = self.transform(view['img'])
 
+            # Handle event_voxel
+            if 'event_voxel' in view:
+                # Validate event_voxel
+                if not isinstance(view['event_voxel'], np.ndarray):
+                    raise TypeError(f"event_voxel must be a NumPy array, got {type(view['event_voxel'])}")
+                if len(view['event_voxel'].shape) != 3:
+                    raise ValueError(f"event_voxel must have 3 dimensions, got shape {view['event_voxel'].shape}")
+                if view['event_voxel'].shape[1:] != (height, width):
+                    raise ValueError(f"event_voxel spatial dimensions {view['event_voxel'].shape[1:]} do not match image size {(height, width)}")
+                # Optionally apply a different transform for event_voxel
+                # For now, keep event_voxel as-is or convert to float32
+                view['event_voxel'] = view['event_voxel'].astype(np.float32)
+
+            # Camera and depthmap processing
             assert 'camera_intrinsics' in view
             if 'camera_pose' not in view:
                 view['camera_pose'] = np.full((4, 4), np.nan, dtype=np.float32)
@@ -139,7 +153,7 @@ class BaseStereoViewDataset (EasyDataset):
             assert width >= height
             self._resolutions.append((width, height))
 
-    def _crop_resize_if_necessary(self, image, depthmap, intrinsics, resolution, rng=None, info=None):
+    def _crop_resize_if_necessary(self, image, depthmap, intrinsics, resolution, rng=None, info=None, event_voxel=None):
         """ This function:
             - first downsizes the image with LANCZOS inteprolation,
               which is better than bilinear interpolation in
@@ -148,6 +162,14 @@ class BaseStereoViewDataset (EasyDataset):
             image = PIL.Image.fromarray(image)
 
         # downscale with lanczos interpolation so that image.size == resolution
+        if event_voxel is not None:
+            if not isinstance(event_voxel, np.ndarray):
+                raise TypeError(f"event_voxel must be a NumPy array, got {type(event_voxel)}")
+            if len(event_voxel.shape) != 3:
+                raise ValueError(f"event_voxel must have 3 dimensions, got shape {event_voxel.shape}")
+            if event_voxel.shape[1:] != image.size[::-1]:
+                raise ValueError(f"event_voxel spatial dimensions {event_voxel.shape[1:]} do not match image size {image.size[::-1]}")
+
         # cropping centered on the principal point
         W, H = image.size
         cx, cy = intrinsics[:2, 2].round().astype(int)
@@ -159,8 +181,7 @@ class BaseStereoViewDataset (EasyDataset):
         l, t = cx - min_margin_x, cy - min_margin_y
         r, b = cx + min_margin_x, cy + min_margin_y
         crop_bbox = (l, t, r, b)
-        image, depthmap, intrinsics = cropping.crop_image_depthmap(image, depthmap, intrinsics, crop_bbox)
-
+        image, depthmap, intrinsics, event_voxel = cropping.crop_image_depthmap(image, depthmap, intrinsics, crop_bbox, event_voxel=event_voxel)
         # transpose the resolution if necessary
         W, H = image.size  # new size
         assert resolution[0] >= resolution[1]
@@ -175,19 +196,19 @@ class BaseStereoViewDataset (EasyDataset):
         # high-quality Lanczos down-scaling
         target_resolution = np.array(resolution)
         if self.aug_focal:
-            crop_scale = self.aug_focal + (1.0 - self.aug_focal) * np.random.beta(0.5, 0.5) # beta distribution, bi-modal
-            image, depthmap, intrinsics = cropping.center_crop_image_depthmap(image, depthmap, intrinsics, crop_scale)
+            crop_scale = self.aug_focal + (1.0 - self.aug_focal) * np.random.beta(0.5, 0.5)
+            image, depthmap, intrinsics, event_voxel = cropping.center_crop_image_depthmap(image, depthmap, intrinsics, crop_scale, event_voxel=event_voxel)
 
         if self.aug_crop > 1:
             target_resolution += rng.integers(0, self.aug_crop)
-        image, depthmap, intrinsics = cropping.rescale_image_depthmap(image, depthmap, intrinsics, target_resolution) # slightly scale the image a bit larger than the target resolution
+        image, depthmap, intrinsics, event_voxel = cropping.rescale_image_depthmap(image, depthmap, intrinsics, target_resolution, event_voxel=event_voxel)
 
         # actual cropping (if necessary) with bilinear interpolation
         intrinsics2 = cropping.camera_matrix_of_crop(intrinsics, image.size, resolution, offset_factor=0.5)
         crop_bbox = cropping.bbox_from_intrinsics_in_out(intrinsics, intrinsics2, resolution)
-        image, depthmap, intrinsics2 = cropping.crop_image_depthmap(image, depthmap, intrinsics, crop_bbox)
+        image, depthmap, intrinsics2, event_voxel = cropping.crop_image_depthmap(image, depthmap, intrinsics, crop_bbox, event_voxel=event_voxel)
 
-        return image, depthmap, intrinsics2
+        return image, depthmap, intrinsics2, event_voxel
 
 
 def is_good_type(key, v):
@@ -195,8 +216,14 @@ def is_good_type(key, v):
     """
     if isinstance(v, (str, int, tuple)):
         return True, None
-    if v.dtype not in (torch.bool, np.float32, torch.float32, bool, np.int32, np.int64, np.uint8):
-        return False, f"bad {v.dtype=}"
+    if key == 'event_voxel':
+        if not isinstance(v, np.ndarray):
+            return False, f"event_voxel must be a NumPy array, got {type(v)}"
+        if v.dtype not in (np.float32, np.float64, np.int32, np.int64, np.uint8):
+            return False, f"bad {v.dtype=} for event_voxel"
+    else:
+        if v.dtype not in (torch.bool, np.float32, torch.float32, bool, np.int32, np.int64, np.uint8):
+            return False, f"bad {v.dtype=}"
     return True, None
 
 
@@ -221,6 +248,11 @@ def transpose_to_landscape(view):
 
         assert view['depthmap'].shape == (height, width)
         view['depthmap'] = view['depthmap'].swapaxes(0, 1)
+
+        if 'event_voxel' in view:
+            assert view['event_voxel'].shape[1:] == (height, width)
+            assert isinstance(view['event_voxel'], np.ndarray), f"event_voxel must be a NumPy array, got {type(view['event_voxel'])}"
+            view['event_voxel'] = view['event_voxel'].swapaxes(1, 2)  # Swap H and W: [C, H, W] -> [C, W, H]
 
         assert view['pts3d'].shape == (height, width, 3)
         view['pts3d'] = view['pts3d'].swapaxes(0, 1)
