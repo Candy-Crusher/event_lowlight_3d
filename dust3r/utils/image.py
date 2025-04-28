@@ -430,22 +430,22 @@ def lightup_image(img, method='clahe', clip_limit=2.0, tile_size=8):
     """ Enhance low-light images using histogram equalization methods.
     
     Args:
-        img (np.ndarray): Input image (either uint8 [0, 255] or float32 [0, 1])
+        img (np.ndarray): Input image (either uint8 [0, 255] or float32/float64 [0, 1])
         method (str): Enhancement method - 'he' for standard Histogram Equalization 
                       or 'clahe' for Contrast Limited Adaptive Histogram Equalization
         clip_limit (float): Contrast limit for CLAHE (only used if method='clahe')
         tile_size (int): Size of grid for CLAHE (only used if method='clahe')
     
     Returns:
-        np.ndarray: Enhanced image in same format as input (uint8 or float32)
+        np.ndarray: Enhanced image in same format as input (uint8 or float32/float64)
     """
     # Store original data type and range
     orig_dtype = img.dtype
-    is_float = orig_dtype == np.float32
+    is_float = np.issubdtype(orig_dtype, np.floating)
     
-    # Convert to uint8 if input is float
+    # Convert to uint8 if input is float (either float32 or float64)
     if is_float:
-        img_uint8 = (img * 255.0).astype(np.uint8)
+        img_uint8 = (img.astype(np.float32) * 255.0).astype(np.uint8)
     else:
         img_uint8 = img
     
@@ -472,8 +472,11 @@ def lightup_image(img, method='clahe', clip_limit=2.0, tile_size=8):
         enhanced_lab = cv2.merge((enhanced_l, a, b))
         enhanced = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2RGB)
     
-    # Convert back to float if input was float
+    # Convert back to original float format if input was float
     if is_float:
         enhanced = enhanced.astype(np.float32) / 255.0
+        # 如果原始类型是float64，则转换回float64
+        if orig_dtype == np.float64:
+            enhanced = enhanced.astype(np.float64)
     
     return enhanced
