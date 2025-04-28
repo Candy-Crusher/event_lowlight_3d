@@ -91,7 +91,7 @@ def imread_cv2(path, options=cv2.IMREAD_COLOR):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     return img
 
-def imreadlowlight_cv2(path, options=cv2.IMREAD_COLOR, brightness_factor=1.0, gamma=1.0, noise_std=0.0, as_uint8=False):
+def imreadlowlight_cv2(path, options=cv2.IMREAD_COLOR, brightness_factor=1.0, gamma=1.0, noise_std=0.0, as_uint8=False, lightup=None):
     """ Open an image or a depthmap with opencv-python, optionally applying low-light transformations.
     
     Args:
@@ -101,6 +101,7 @@ def imreadlowlight_cv2(path, options=cv2.IMREAD_COLOR, brightness_factor=1.0, ga
         gamma (float): Gamma correction value (1.0 = no change, >1.0 = darker).
         noise_std (float): Standard deviation of Gaussian noise (0.0 = no noise).
         as_uint8 (bool): If True, return uint8 array in [0, 255]; else float32 in [0, 1].
+        lightup (str or None): If not None, apply lightup enhancement. Options: 'he', 'clahe', or None.
     
     Returns:
         np.ndarray: Loaded and transformed image (RGB, either uint8 [0, 255] or float32 [0, 1]).
@@ -134,6 +135,10 @@ def imreadlowlight_cv2(path, options=cv2.IMREAD_COLOR, brightness_factor=1.0, ga
         noise = np.random.normal(0, noise_std, img.shape)
         img = img + noise
         img = np.clip(img, 0.0, 1.0)
+    
+    # Apply lightup enhancement if requested
+    if lightup is not None and (brightness_factor < 1.0 or gamma != 1.0):
+        img = lightup_image(img, method=lightup)
     
     # Convert to uint8 if requested (for PIL compatibility)
     if as_uint8:
@@ -420,3 +425,55 @@ def get_overlaied_gif(folder, img_format="frame_*.png", mask_format="dynamic_mas
         plt.close(fig)  # Close the figure to free memory
     # Save frames as a GIF using imageio
     imageio.mimsave(os.path.join(folder,output_path), frames, fps=10)
+
+def lightup_image(img, method='clahe', clip_limit=2.0, tile_size=8):
+    """ Enhance low-light images using histogram equalization methods.
+    
+    Args:
+        img (np.ndarray): Input image (either uint8 [0, 255] or float32 [0, 1])
+        method (str): Enhancement method - 'he' for standard Histogram Equalization 
+                      or 'clahe' for Contrast Limited Adaptive Histogram Equalization
+        clip_limit (float): Contrast limit for CLAHE (only used if method='clahe')
+        tile_size (int): Size of grid for CLAHE (only used if method='clahe')
+    
+    Returns:
+        np.ndarray: Enhanced image in same format as input (uint8 or float32)
+    """
+    # Store original data type and range
+    orig_dtype = img.dtype
+    is_float = orig_dtype == np.float32
+    
+    # Convert to uint8 if input is float
+    if is_float:
+        img_uint8 = (img * 255.0).astype(np.uint8)
+    else:
+        img_uint8 = img
+    
+    # Process based on image channels
+    if img_uint8.ndim == 2:  # Grayscale
+        if method == 'he':
+            enhanced = cv2.equalizeHist(img_uint8)
+        else:  # clahe
+            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(tile_size, tile_size))
+            enhanced = clahe.apply(img_uint8)
+    else:  # Color image
+        # Convert to LAB color space (L=lightness, A=green-red, B=blue-yellow)
+        lab = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab)
+        
+        # Apply histogram equalization to the L channel
+        if method == 'he':
+            enhanced_l = cv2.equalizeHist(l)
+        else:  # clahe
+            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(tile_size, tile_size))
+            enhanced_l = clahe.apply(l)
+        
+        # Merge channels and convert back to RGB
+        enhanced_lab = cv2.merge((enhanced_l, a, b))
+        enhanced = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2RGB)
+    
+    # Convert back to float if input was float
+    if is_float:
+        enhanced = enhanced.astype(np.float32) / 255.0
+    
+    return enhanced
