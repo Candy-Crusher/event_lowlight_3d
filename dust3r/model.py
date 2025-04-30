@@ -63,8 +63,8 @@ class AsymmetricCroCo3DStereo (
                  freeze='none',
                  landscape_only=True,
                  patch_embed_cls='PatchEmbedDust3R',  # PatchEmbedDust3R or ManyAR_PatchEmbed
-                 use_event_control=False,  # Flag to enable event control
-                 event_in_channels=6,    # Event voxel input channels
+                 use_event_control=True,  # Flag to enable event control
+                 event_in_channels=5,    # Event voxel input channels
                  **croco_kwargs):
         self.patch_embed_cls = patch_embed_cls
         self.use_event_control = use_event_control
@@ -103,6 +103,10 @@ class AsymmetricCroCo3DStereo (
         self.enc_zero_conv_out = self.zero_module(nn.Conv1d(enc_embed_dim, enc_embed_dim, 1))
         # Trainable copy
         self.enc_blocks_trainable = nn.ModuleList([deepcopy(blk) for blk in self.enc_blocks])
+        # set to trainable
+        for blk in self.enc_blocks_trainable:
+            for param in blk.parameters():
+                param.requires_grad = True
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kw):

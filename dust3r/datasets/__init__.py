@@ -16,6 +16,7 @@ from .sintel import SintelDUSt3R  # noqa
 from .tartanair import TarTanAirDUSt3R  # noqa
 from .spring_dataset import SpringDUSt3R  # noqa
 from .dynamic_replica import DynamicReplicaDUSt3R  # noqa
+from .mvsec import MVSEC  # noqa
 
 def get_data_loader(dataset, batch_size, num_workers=8, shuffle=True, drop_last=True, pin_mem=True):
     import torch
