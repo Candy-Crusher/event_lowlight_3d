@@ -247,8 +247,8 @@ def mvsecRectifyEvents(events, x_map, y_map):
 root_dir = '/mnt/sdc/lxy/datasets/MVSEC/OpenDataLab___MVSEC/raw/MVSEC/hdf5/'
 scenario = 'outdoor_day'
 split = '2'
-save_root = '/mnt/sdc/lxy/datasets/MVSEC/processed/' + f'{scenario}/{scenario}{split}/'
-timestamp_root = save_root + 'index_It_Dt_left.txt'
+save_root = '/mnt/sdc/lxy/datasets/MVSEC/processed_raw/' + f'{scenario}/{scenario}{split}/'
+timestamp_root = save_root + 'index_It_left.txt'
 data_path = root_dir + f'{scenario}/{scenario}{split}_data.hdf5'
 gt_path = root_dir + f'{scenario}/{scenario}{split}_gt.hdf5'
 
@@ -263,8 +263,8 @@ with h5py.File(data_path, 'r') as data, h5py.File(gt_path, 'r') as gt:
     image_raw_event_inds = data['image_raw_event_inds'][:]
     blended_image_rect = gt['blended_image_rect'][:]
     blended_image_rect_ts = gt['blended_image_rect_ts'][:]
-    depth_image_rect = gt['depth_image_rect'][:]
-    depth_image_rect_ts = gt['depth_image_rect_ts'][:]
+    # depth_image_rect = gt['depth_image_rect'][:]
+    # depth_image_rect_ts = gt['depth_image_rect_ts'][:]
     pose_ts = gt['pose_ts'][:]
     pose = gt['pose'][:]
     Levents = data['events'][:]
@@ -279,8 +279,8 @@ with h5py.File(data_path, 'r') as data, h5py.File(gt_path, 'r') as gt:
     print(f"Image raw: {image_raw.shape}")
     print(f"Image raw timestamps: {image_raw_ts.shape}")
     print(f"Image raw event indices: {image_raw_event_inds.shape}")
-    print(f"Depth image rect: {depth_image_rect.shape}")
-    print(f"Depth image rect timestamps: {depth_image_rect_ts.shape}")
+    # print(f"Depth image rect: {depth_image_rect.shape}")
+    # print(f"Depth image rect timestamps: {depth_image_rect_ts.shape}")
     print(f"Blended image rect: {blended_image_rect.shape}")
     print(f"Blended image rect timestamps: {blended_image_rect_ts.shape}")
     print(f"Pose timestamps: {pose_ts.shape}")
@@ -291,39 +291,19 @@ with open(timestamp_root, 'r') as f:
     lines = f.readlines()
     # Extract the first column from each line
     img_indices = [int(line.split('\t')[0]) for line in lines]
-    depth_indices = [int(line.split('\t')[1]) for line in lines]
-    image_timestamps = [float(line.split()[2]) for line in lines]
-    depth_timestamps = [float(line.split()[3]) for line in lines]
+    image_timestamps = [float(line.split()[1]) for line in lines]
 
 # check if any duplicate indices
 unique_indices, counts = np.unique(img_indices, return_counts=True)
 for i in range(len(counts)):
     if counts[i] > 1:
         print(f"Duplicate index {unique_indices[i]} found {counts[i]} times")
-# check if t_diff larger than 20 ms
-for j in range(len(image_timestamps)):
-    if np.abs(image_timestamps[j] - depth_timestamps[j]) > 20*1e-3:
-        print(f"Timestamp mismatch at index {j}: {(image_timestamps[j]-depth_timestamps[j])*1e3:.2f} ms")
 # check delta t
 delta_t_img = np.diff(image_timestamps)
-delta_t_depth = np.diff(depth_timestamps)
 print('Delta t image:', delta_t_img.max(), delta_t_img.min(), delta_t_img.mean())
-print('Delta t depth:', delta_t_depth.max(), delta_t_depth.min(), delta_t_depth.mean())
 
 voxel_grid = VoxelGrid(channels=5, height=260, width=346, normalize=True)
 
-save_root = '/mnt/sdc/lxy/datasets/MVSEC/processed/' + f'{scenario}/{scenario}{split}/'
-depth_root = save_root + 'depth_left/'
-depth_filted_root = save_root + 'depth_filtered_left/'
-depth_template = '_left_depth.npy'
-blended_image_template = '_left_blended_image.png'
-blended_image_root = save_root + 'blended_image_left/'
-image_root = save_root + 'image_left/'
-image_template = '_left.png'
-pose_timg_root = save_root + 'pose_left.txt'
-pose_tdepth_root = save_root + 'pose_tdepth_left.txt'
-pose_origin_root = save_root + 'pose_origin_left.txt'
-timestamp_root = save_root + 'index_It_Dt_left.txt'
 event_root = save_root + 'event_left/event_voxel_left/'
 event_template = '_event.hdf5'
 os.makedirs(event_root, exist_ok=True)
@@ -335,15 +315,14 @@ for i in tqdm(range(len(event_indices)-1)):
     event_id_end = event_indices[i+1] 
     # print(f"Processing events from {event_id_start} to {event_id_end}") 
     events = Levents[event_id_start:event_id_end] 
-    rect_events = np.array(mvsecRectifyEvents(events, Lx_map, Ly_map)) 
-    event_x = rect_events[:, 0] 
-    event_y = rect_events[:, 1] 
-    event_t = rect_events[:, 2] 
-    event_p = rect_events[:, 3] 
+    event_x = events[:, 0] 
+    event_y = events[:, 1] 
+    event_t = events[:, 2] 
+    event_p = events[:, 3] 
     event_representation = events_to_voxel_grid(bin=5, x=event_x, y=event_y, p=event_p, t=event_t) 
     event_filename = event_root + f'{i:06d}_{i+1:06d}' + event_template 
     # print(f"Saving event representation to {event_filename}") 
-    print(event_representation.shape) 
+    # print(event_representation.shape) 
     with h5py.File(event_filename, 'w') as f: 
         f.create_dataset('event_voxels', data=event_representation.cpu().numpy()) 
     iter += 1

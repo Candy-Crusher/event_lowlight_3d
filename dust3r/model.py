@@ -63,7 +63,7 @@ class AsymmetricCroCo3DStereo (
                  freeze='none',
                  landscape_only=True,
                  patch_embed_cls='PatchEmbedDust3R',  # PatchEmbedDust3R or ManyAR_PatchEmbed
-                 use_event_control=True,  # Flag to enable event control
+                 use_event_control=False,  # Flag to enable event control
                  event_in_channels=5,    # Event voxel input channels
                  **croco_kwargs):
         self.patch_embed_cls = patch_embed_cls
@@ -134,6 +134,7 @@ class AsymmetricCroCo3DStereo (
             'mask':     [self.mask_token],
             'encoder':  [self.mask_token, self.patch_embed, self.enc_blocks],
             'encoder_and_decoder': [self.mask_token, self.patch_embed, self.enc_blocks, self.dec_blocks, self.dec_blocks2],
+            'decoder': [self.dec_blocks, self.dec_blocks2],
             'all':     [self.mask_token, self.patch_embed, self.enc_blocks, self.dec_blocks, self.dec_blocks2,
                         self.downstream_head1, self.downstream_head2]
         }

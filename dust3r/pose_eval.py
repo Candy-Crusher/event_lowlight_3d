@@ -106,6 +106,7 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
 
             with torch.enable_grad():
                 if len(imgs) > 2:
+                    import ipdb; ipdb.set_trace()
                     mode = GlobalAlignerMode.PointCloudOptimizer
                     scene = global_aligner(
                         output, device=device, mode=mode, verbose=not silent,

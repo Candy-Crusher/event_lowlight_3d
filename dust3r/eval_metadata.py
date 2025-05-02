@@ -4,6 +4,20 @@ from tqdm import tqdm
 
 # Define the merged dataset metadata dictionary
 dataset_metadata = {
+    'mvsec': {
+        'img_path': "data/MVSEC/processed_raw",
+        'anno_path': lambda img_path, anno_path, seq: os.path.join(img_path, seq, "pose_left.txt"),
+        'mask_path': None,
+        'dir_path_func': lambda img_path, seq: os.path.join(img_path, seq, "image_left"),
+        'gt_traj_func': lambda img_path, anno_path, seq: None,
+        'traj_format': None,
+        'seq_list': ["outdoor_day/outdoor_day1",
+                    "outdoor_night/outdoor_night1","outdoor_night/outdoor_night2","outdoor_night/outdoor_night3"],
+        'full_seq': False,
+        'mask_path_seq_func': lambda mask_path, seq: None,
+        'skip_condition': None,
+        'process_func': lambda args, img_path: process_mvsec(args, img_path),
+    },
     'davis': {
         'img_path': "data/davis/DAVIS/JPEGImages/480p",
         'mask_path': "data/davis/DAVIS/masked_images/480p",
@@ -86,6 +100,18 @@ dataset_metadata = {
 }
 
 # Define processing functions for each dataset
+def process_mvsec(args, img_path):
+    if args.full_seq:
+        seq_list = ["outdoor_day/outdoor_day1",
+                    "outdoor_night/outdoor_night1","outdoor_night/outdoor_night2","outdoor_night/outdoor_night3"]
+    else:
+        seq_list = args.seq_list
+    print(f'Processing sequences: {seq_list}')
+    for seq in tqdm(seq_list):
+        filelist = sorted(glob.glob(f'{img_path}/{seq}/image_left/*.png'))
+        save_dir = f'{args.output_dir}/{seq}'
+        yield filelist, save_dir
+
 def process_kitti(args, img_path):
     for dir in tqdm(sorted(glob.glob(f'{img_path}/*'))):
         filelist = sorted(glob.glob(f'{dir}/*.png'))
