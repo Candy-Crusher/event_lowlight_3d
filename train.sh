@@ -4,7 +4,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 --master_port=29605 lau
     --train_criterion="ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)"  \
     --test_criterion="Regr3D_ScaleShiftInv(L21, gt_scale=True)"   \
     --pretrained="checkpoints/MonST3R_PO-TA-S-W_ViTLarge_BaseDecoder_512_dpt.pth"   \
-    --lr=0.000001 --min_lr=1e-06 --warmup_epochs=3 --epochs=50 --batch_size=1 --accum_iter=4  \
+    --lr=0.00005 --min_lr=1e-06 --warmup_epochs=3 --epochs=50 --batch_size=1 --accum_iter=4  \
     --save_freq=3 --keep_freq=5 --eval_freq=1  \
     --output_dir="/mnt/sdc/xswu/3d/code/results/MonST3R_PO-TA-S-W_ViTLarge_BaseDecoder_512_dpt_tartanair_raw_wE" \
     --wandb
