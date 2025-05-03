@@ -85,7 +85,7 @@ class MVSEC(BaseStereoViewDataset):
             rgb_path = os.path.join(seq, 'image_left')
             event_voxel_path = os.path.join(seq, 'event_left', 'event_voxel_left')
             depth_path = os.path.join(seq, 'depth_left')
-            caminfo_path = os.path.join(seq, 'pose_left.txt')
+            caminfo_path = os.path.join(seq, 'c2wpose_left.txt')
             caminfo = []
             # Read the file line by line
             with open(caminfo_path, 'r') as f:

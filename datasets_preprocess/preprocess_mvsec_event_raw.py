@@ -245,8 +245,9 @@ def mvsecRectifyEvents(events, x_map, y_map):
 
 
 root_dir = '/mnt/sdc/lxy/datasets/MVSEC/OpenDataLab___MVSEC/raw/MVSEC/hdf5/'
-scenario = 'outdoor_day'
-split = '2'
+# scenario = 'outdoor_night'
+scenario = 'indoor_flying'
+split = '4'
 save_root = '/mnt/sdc/lxy/datasets/MVSEC/processed_raw/' + f'{scenario}/{scenario}{split}/'
 timestamp_root = save_root + 'index_It_left.txt'
 data_path = root_dir + f'{scenario}/{scenario}{split}_data.hdf5'
@@ -305,8 +306,14 @@ print('Delta t image:', delta_t_img.max(), delta_t_img.min(), delta_t_img.mean()
 voxel_grid = VoxelGrid(channels=5, height=260, width=346, normalize=True)
 
 event_root = save_root + 'event_left/event_voxel_left/'
+event_stream_root = save_root + 'event_left/event_stream_left/'
 event_template = '_event.hdf5'
 os.makedirs(event_root, exist_ok=True)
+os.makedirs(event_stream_root, exist_ok=True)
+
+event_stream_path = save_root + 'event_left/' + 'all' + event_template 
+with h5py.File(event_stream_path, 'w') as f: 
+    f.create_dataset('event_stream', data=Levents) 
 
 iter=0 
 event_indices = image_raw_event_inds[img_indices]
@@ -315,6 +322,9 @@ for i in tqdm(range(len(event_indices)-1)):
     event_id_end = event_indices[i+1] 
     # print(f"Processing events from {event_id_start} to {event_id_end}") 
     events = Levents[event_id_start:event_id_end] 
+    event_stream_filename = event_stream_root + f'{i:06d}_{i+1:06d}' + event_template 
+    with h5py.File(event_stream_filename, 'w') as f: 
+        f.create_dataset('event_stream', data=events) 
     event_x = events[:, 0] 
     event_y = events[:, 1] 
     event_t = events[:, 2] 

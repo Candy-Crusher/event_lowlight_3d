@@ -5,12 +5,15 @@ from tqdm import tqdm
 # Define the merged dataset metadata dictionary
 dataset_metadata = {
     'mvsec': {
-        'img_path': "data/MVSEC/processed_raw",
-        'anno_path': lambda img_path, anno_path, seq: os.path.join(img_path, seq, "pose_left.txt"),
+        # 'img_path': "data/MVSEC/processed_raw",
+        'img_path': "data/MVSEC/monst3r_test",
         'mask_path': None,
-        'dir_path_func': lambda img_path, seq: os.path.join(img_path, seq, "image_left"),
-        'gt_traj_func': lambda img_path, anno_path, seq: None,
-        'traj_format': None,
+        # 'dir_path_func': lambda img_path, seq: os.path.join(img_path, seq, "image_left"),
+        # 'dir_path_func': lambda img_path, seq: os.path.join(img_path, seq, "seq10/image_left"),
+        'dir_path_func': lambda img_path, seq: os.path.join(img_path, seq, "seq0/image_evlight_left"),
+        # 'gt_traj_func': lambda img_path, anno_path, seq: os.path.join(img_path, seq, "pose_left.txt"),
+        'gt_traj_func': lambda img_path, anno_path, seq: os.path.join(img_path, seq, "seq0/pose_left.txt"),
+        'traj_format': 'mvsec',
         'seq_list': ["outdoor_day/outdoor_day1",
                     "outdoor_night/outdoor_night1","outdoor_night/outdoor_night2","outdoor_night/outdoor_night3"],
         'full_seq': False,
@@ -108,7 +111,8 @@ def process_mvsec(args, img_path):
         seq_list = args.seq_list
     print(f'Processing sequences: {seq_list}')
     for seq in tqdm(seq_list):
-        filelist = sorted(glob.glob(f'{img_path}/{seq}/image_left/*.png'))
+        # filelist = sorted(glob.glob(f'{img_path}/{seq}/image_left/*.png'))
+        filelist = sorted(glob.glob(f'{img_path}/{seq}/seq0/image_left/*.png'))
         save_dir = f'{args.output_dir}/{seq}'
         yield filelist, save_dir
 

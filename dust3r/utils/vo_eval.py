@@ -93,6 +93,34 @@ def load_sintel_traj(gt_file): # './data/sintel/training/camdata_left/alley_2'
     tt = np.expand_dims(np.stack(tstamps, 0), -1)
     return tum_gt_poses, tt
 
+def load_mvsec_traj(gt_file):
+    # Reshape the flattened cam2world matrix into a 4x4 matrix
+    with open(gt_file, 'r') as src_file:
+        lines = src_file.readlines()
+    
+    xyzs, wxyzs = [], []
+    tum_gt_poses = []
+    tstamps = []
+    for line in lines:
+        # Split the line into values
+        values = line.strip('').split()
+
+        timestamp = float(values[0])
+        tstamps.append(timestamp)
+
+        xyz = np.array([float(v) for v in values[1:4]])  # tx, ty, tz
+        xyzs.append(xyz)
+
+        xyzw = np.array([float(v) for v in values[4:]])    # qx, qy, qz, qw
+        wxyz = np.array([xyzw[-1], xyzw[0], xyzw[1], xyzw[2]])
+        wxyzs.append(wxyz)
+
+        tum_gt_pose = np.concatenate([xyz, wxyz], 0)
+        tum_gt_poses.append(tum_gt_pose)
+
+    tum_gt_poses = np.stack(tum_gt_poses, 0)
+    tt = np.expand_dims(np.stack(tstamps, 0), -1)
+    return tum_gt_poses, tt
 
 def load_traj(gt_traj_file, traj_format="sintel", skip=0, stride=1, num_frames=None):
     """Read trajectory format. Return in TUM-RGBD format.
@@ -110,6 +138,8 @@ def load_traj(gt_traj_file, traj_format="sintel", skip=0, stride=1, num_frames=N
         quat = traj.orientations_quat_wxyz
         timestamps_mat = traj.timestamps
         traj_tum = np.column_stack((xyz, quat))
+    elif traj_format == "mvsec":    # flatten 4x4 matrix
+        traj_tum, timestamps_mat = load_mvsec_traj(gt_traj_file)
     else:
         raise NotImplementedError
 

@@ -95,6 +95,7 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
                 filelist, size=load_img_size, verbose=False,
                 dynamic_mask_root=mask_path_seq, crop=not args.no_crop
             )
+            print(f'Loaded {len(imgs)} images from {seq}.')
             if args.eval_dataset == 'davis' and len(imgs) > 95:
                 # use swinstride-4
                 scene_graph_type = scene_graph_type.replace('5', '4')
@@ -106,7 +107,7 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
 
             with torch.enable_grad():
                 if len(imgs) > 2:
-                    import ipdb; ipdb.set_trace()
+                    # import ipdb; ipdb.set_trace()
                     mode = GlobalAlignerMode.PointCloudOptimizer
                     scene = global_aligner(
                         output, device=device, mode=mode, verbose=not silent,
