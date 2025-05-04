@@ -6,13 +6,13 @@ from tqdm import tqdm
 dataset_metadata = {
     'mvsec': {
         # 'img_path': "data/MVSEC/processed_raw",
-        'img_path': "data/MVSEC/monst3r_test",
+        'img_path': "data/MVSEC/monst3r_test_rect_odem",
         'mask_path': None,
         # 'dir_path_func': lambda img_path, seq: os.path.join(img_path, seq, "image_left"),
-        # 'dir_path_func': lambda img_path, seq: os.path.join(img_path, seq, "seq10/image_left"),
-        'dir_path_func': lambda img_path, seq: os.path.join(img_path, seq, "seq0/image_evlight_left"),
-        # 'gt_traj_func': lambda img_path, anno_path, seq: os.path.join(img_path, seq, "pose_left.txt"),
-        'gt_traj_func': lambda img_path, anno_path, seq: os.path.join(img_path, seq, "seq0/pose_left.txt"),
+        'dir_path_func': lambda img_path, seq: os.path.join(img_path, seq, "seq36/image_left"),
+        # 'dir_path_func': lambda img_path, seq: os.path.join(img_path, seq, "seq0/image_evlight_left"),
+        # 'gt_traj_func': lambda img_path, anno_path, seq: os.path.join(img_path, seq, "odem_pose_left.txt"),
+        'gt_traj_func': lambda img_path, anno_path, seq: os.path.join(img_path, seq, "seq36/odem_pose_left.txt"),
         'traj_format': 'mvsec',
         'seq_list': ["outdoor_day/outdoor_day1",
                     "outdoor_night/outdoor_night1","outdoor_night/outdoor_night2","outdoor_night/outdoor_night3"],

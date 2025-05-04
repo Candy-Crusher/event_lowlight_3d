@@ -19,6 +19,9 @@ from third_party.raft import load_RAFT
 import dust3r.utils.path_to_croco  # noqa: F401
 from models.croco import CroCoNet  # noqa
 
+import cv2
+import torch.nn.functional as F
+
 inf = float('inf')
 
 hf_version_number = huggingface_hub.__version__
@@ -63,7 +66,7 @@ class AsymmetricCroCo3DStereo (
                  freeze='none',
                  landscape_only=True,
                  patch_embed_cls='PatchEmbedDust3R',  # PatchEmbedDust3R or ManyAR_PatchEmbed
-                 use_event_control=False,  # Flag to enable event control
+                 use_event_control=True,  # Flag to enable event control
                  event_in_channels=5,    # Event voxel input channels
                  **croco_kwargs):
         self.patch_embed_cls = patch_embed_cls
@@ -81,10 +84,24 @@ class AsymmetricCroCo3DStereo (
         if self.use_event_control:
             self._init_event_control(croco_kwargs.get('img_size', 224), croco_kwargs.get('patch_size', 16),
                                     croco_kwargs.get('enc_embed_dim', 768), croco_kwargs.get('dec_embed_dim', 768))
+            self.patch_size = croco_kwargs.get('patch_size', 16)
+            self.ll_threshold_ratio = 0.5
     def zero_module(self, module):
         for p in module.parameters():
             nn.init.zeros_(p)
         return module
+
+    def masks_to_patch_masks(self, masks):
+        B, H, W = masks.shape
+        # 将掩码二值化（255 -> 1, 0 -> 0）
+        masks = (masks == 255).float()
+        # 使用avg_pool2d计算每个补丁的低光像素比例
+        patch_masks = F.avg_pool2d(masks.unsqueeze(1), kernel_size=self.patch_size, stride=self.patch_size)  # 形状: (B, 1, H/P, W/P)
+        patch_masks = patch_masks.squeeze(1).flatten(1)  # 形状: (B, N)，N=(H/P)*(W/P)
+        # 应用阈值，生成二值补丁掩码
+        patch_masks = (patch_masks >= self.ll_threshold_ratio).float()  # 形状: (B, N)
+        patch_masks = patch_masks.unsqueeze(2)  # 形状: (B, N, 1)
+        return patch_masks
 
     def _init_event_control(self, img_size, patch_size, enc_embed_dim, dec_embed_dim):
         """ Initialize modules for processing event voxel data and injecting it into the network. """
@@ -162,7 +179,7 @@ class AsymmetricCroCo3DStereo (
         self.head1 = transpose_to_landscape(self.downstream_head1, activate=landscape_only)
         self.head2 = transpose_to_landscape(self.downstream_head2, activate=landscape_only)
 
-    def _encode_image(self, image, true_shape, event_voxel=None):
+    def _encode_image(self, image, true_shape, event_voxel=None, LL_mask=None):
         # embed the image into patches  (x has size B x Npatches x C)
         x, pos = self.patch_embed(image, true_shape=true_shape)
         # x (B, 576, 1024) pos (B, 576, 2); patch_size=16
@@ -175,6 +192,8 @@ class AsymmetricCroCo3DStereo (
             # Event voxel shape: [B, 6, H, W]
             c, _ = self.event_embed(event_voxel, true_shape=true_shape)
             c_in = self.enc_zero_conv_in(c.transpose(1, 2)).transpose(1, 2) + x  # [B, N, enc_embed_dim]
+            patch_mask = self.masks_to_patch_masks(LL_mask) if LL_mask is not None else None
+
         # add positional embedding without cls token
         assert self.enc_pos_embed is None
         # TODO: where to add mask for the patches
@@ -186,28 +205,39 @@ class AsymmetricCroCo3DStereo (
                 c_in = self.enc_blocks_trainable[i](c_in, posvis)
                 if i==len(self.enc_blocks)-1:
                     c_out = self.enc_zero_conv_out(c_in.transpose(1, 2)).transpose(1, 2)
-                    x = x + c_out
+
+                    # 在 forward 中进行 adaptive 相加
+                    if patch_mask is not None:   
+                        x = x * (1 - patch_mask) + c_out * patch_mask
+                    else:
+                        x = x + c_out
 
         x = self.enc_norm(x)
         return x, pos, None
 
-    def _encode_image_pairs(self, img1, img2, true_shape1, true_shape2, event_voxel1=None, event_voxel2=None):
+    def _encode_image_pairs(self, img1, img2, true_shape1, true_shape2, event_voxel1=None, event_voxel2=None, LL_mask1=None, LL_mask2=None):
         if img1.shape[-2:] == img2.shape[-2:]:
             out, pos, _ = self._encode_image(
                 torch.cat((img1, img2), dim=0),
                 torch.cat((true_shape1, true_shape2), dim=0),
-                torch.cat((event_voxel1, event_voxel2), dim=0) if event_voxel1 is not None else None
+                torch.cat((event_voxel1, event_voxel2), dim=0) if event_voxel1 is not None else None,
+                torch.cat((LL_mask1, LL_mask2), dim=0) if LL_mask1 is not None else None,
             )
             out, out2 = out.chunk(2, dim=0)
             pos, pos2 = pos.chunk(2, dim=0)
         else:
-            out, pos, _ = self._encode_image(img1, true_shape1, event_voxel1)
-            out2, pos2, _ = self._encode_image(img2, true_shape2, event_voxel2)
+            out, pos, _ = self._encode_image(img1, true_shape1, event_voxel1, LL_mask1 if LL_mask1 is not None else None)
+            out2, pos2, _ = self._encode_image(img2, true_shape2, event_voxel2, LL_mask2 if LL_mask2 is not None else None)
         return out, out2, pos, pos2
 
     def _encode_symmetrized(self, view1, view2):
         img1 = view1['img']
         img2 = view2['img']
+        if 'low_light_mask' in view1:
+            LL_mask1 = view1['low_light_mask']
+            LL_mask2 = view2['low_light_mask']
+        else:
+            LL_mask1 = LL_mask2 = None
         event_voxel1 = view1.get('event_voxel')
         event_voxel2 = view2.get('event_voxel')
         B = img1.shape[0]
@@ -222,13 +252,19 @@ class AsymmetricCroCo3DStereo (
             feat1, feat2, pos1, pos2 = self._encode_image_pairs(
                 img1[::2], img2[::2], shape1[::2], shape2[::2],
                 event_voxel1[::2] if event_voxel1 is not None else None,
-                event_voxel2[::2] if event_voxel2 is not None else None
+                event_voxel2[::2] if event_voxel2 is not None else None,
+                LL_mask1[::2] if LL_mask1 is not None else None,
+                LL_mask2[::2] if LL_mask2 is not None else None
             )
             feat1, feat2 = interleave(feat1, feat2)
             pos1, pos2 = interleave(pos1, pos2)
         else:
             feat1, feat2, pos1, pos2 = self._encode_image_pairs(
-                img1, img2, shape1, shape2, event_voxel1, event_voxel2
+                img1, img2, shape1, shape2, 
+                event_voxel1 if event_voxel1 is not None else None, 
+                event_voxel2 if event_voxel2 is not None else None,
+                LL_mask1 if LL_mask1 is not None else None,
+                LL_mask2 if LL_mask2 is not None else None
             )
 
         return (shape1, shape2), (feat1, feat2), (pos1, pos2)

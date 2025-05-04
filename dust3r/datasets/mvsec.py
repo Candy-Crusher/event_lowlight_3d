@@ -85,7 +85,7 @@ class MVSEC(BaseStereoViewDataset):
             rgb_path = os.path.join(seq, 'image_left')
             event_voxel_path = os.path.join(seq, 'event_left', 'event_voxel_left')
             depth_path = os.path.join(seq, 'depth_left')
-            caminfo_path = os.path.join(seq, 'c2wpose_left.txt')
+            caminfo_path = os.path.join(seq, 'odem_c2wpose_left.txt')
             caminfo = []
             # Read the file line by line
             with open(caminfo_path, 'r') as f:
@@ -192,8 +192,14 @@ class MVSEC(BaseStereoViewDataset):
 
             rgb_image, depthmap, intrinsics, event_voxel = self._crop_resize_if_necessary(
                 rgb_image, depthmap, self.intrinsics, resolution, rng=rng, info=impath, event_voxel=event_voxel)
+            
+            # hsv_image = cv2.cvtColor(np.array(rgb_image), cv2.COLOR_RGB2HSV)
+            # value_channel = hsv_image[:, :, 2]  # 使用Value通道
+            # _, low_light_mask = cv2.threshold(value_channel, 10, 1, cv2.THRESH_BINARY_INV)
+
             views.append(dict(
                 img=rgb_image,
+                # low_light_mask=low_light_mask,
                 event_voxel=event_voxel,
                 depthmap=depthmap,
                 camera_pose=camera_pose,
@@ -244,7 +250,7 @@ if __name__ == "__main__":
         clip_step=clip_step,
         quick=quick,
         verbose=False,
-        resolution=(512,384), 
+        resolution=(384,260), 
         dist_type='linear_9_1',
         aug_crop=16)
     
