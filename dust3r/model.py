@@ -18,6 +18,7 @@ from third_party.raft import load_RAFT
 
 import dust3r.utils.path_to_croco  # noqa: F401
 from models.croco import CroCoNet  # noqa
+from .event_model import create_model
 
 import cv2
 import torch.nn.functional as F
@@ -106,24 +107,19 @@ class AsymmetricCroCo3DStereo (
     def _init_event_control(self, img_size, patch_size, enc_embed_dim, dec_embed_dim):
         """ Initialize modules for processing event voxel data and injecting it into the network. """
         # embedding
-        # self.event_embed = nn.Sequential(
-        #     nn.Conv2d(self.event_in_channels, 32, kernel_size=3, padding=1),
-        #     nn.ReLU(),
-        #     nn.Conv2d(32, enc_embed_dim, kernel_size=3, padding=1),
-        #     nn.ReLU(),
-        #     nn.Conv2d(enc_embed_dim, enc_embed_dim, kernel_size=patch_size, stride=patch_size)  # Downsample to patch size
-        # )
-        self.event_embed = deepcopy(self.patch_embed)
-        self.event_embed.proj = nn.Conv2d(self.event_in_channels, enc_embed_dim, kernel_size=patch_size, stride=patch_size)
-        # Zero-convolution layers
-        self.enc_zero_conv_in = self.zero_module(nn.Conv1d(enc_embed_dim, enc_embed_dim, 1))
-        self.enc_zero_conv_out = self.zero_module(nn.Conv1d(enc_embed_dim, enc_embed_dim, 1))
+        # self.event_embed = deepcopy(self.patch_embed)
+        # self.event_embed.proj = nn.Conv2d(self.event_in_channels, enc_embed_dim, kernel_size=patch_size, stride=patch_size)
+        # # Zero-convolution layers
+        # self.enc_zero_conv_in = self.zero_module(nn.Conv1d(enc_embed_dim, enc_embed_dim, 1))
+        # self.enc_zero_conv_out = self.zero_module(nn.Conv1d(enc_embed_dim, enc_embed_dim, 1))
         # Trainable copy
-        self.enc_blocks_trainable = nn.ModuleList([deepcopy(blk) for blk in self.enc_blocks])
-        # set to trainable
-        for blk in self.enc_blocks_trainable:
-            for param in blk.parameters():
-                param.requires_grad = True
+        # self.enc_blocks_trainable = nn.ModuleList([deepcopy(blk) for blk in self.enc_blocks])
+        self.enc_blocks_trainable = create_model()
+
+        # Set all parameters of the SWINPad model to trainable
+        for param in self.enc_blocks_trainable.parameters():
+            param.requires_grad = True
+        
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kw):
@@ -187,12 +183,12 @@ class AsymmetricCroCo3DStereo (
         posvis = pos
 
         # Process event voxel if provided
-        event_features = None
-        if self.use_event_control and event_voxel is not None:
-            # Event voxel shape: [B, 6, H, W]
-            c, _ = self.event_embed(event_voxel, true_shape=true_shape)
-            c_in = self.enc_zero_conv_in(c.transpose(1, 2)).transpose(1, 2) + x  # [B, N, enc_embed_dim]
-            patch_mask = self.masks_to_patch_masks(LL_mask) if LL_mask is not None else None
+        # event_features = None
+        # if self.use_event_control and event_voxel is not None:
+        #     # Event voxel shape: [B, 6, H, W]
+        #     c, _ = self.event_embed(event_voxel, true_shape=true_shape)
+        #     c_in = self.enc_zero_conv_in(c.transpose(1, 2)).transpose(1, 2) + x  # [B, N, enc_embed_dim]
+        #     patch_mask = self.masks_to_patch_masks(LL_mask) if LL_mask is not None else None
 
         # add positional embedding without cls token
         assert self.enc_pos_embed is None
@@ -201,16 +197,19 @@ class AsymmetricCroCo3DStereo (
         # Apply transformer encoder blocks with event control
         for i, blk in enumerate(self.enc_blocks):
             x = blk(x, posvis)
-            if self.use_event_control and event_voxel is not None:
-                c_in = self.enc_blocks_trainable[i](c_in, posvis)
-                if i==len(self.enc_blocks)-1:
-                    c_out = self.enc_zero_conv_out(c_in.transpose(1, 2)).transpose(1, 2)
+            # if self.use_event_control and event_voxel is not None:
+            #     c_in = self.enc_blocks_trainable[i](c_in, posvis)
+            #     if i==len(self.enc_blocks)-1:
+            #         c_out = self.enc_zero_conv_out(c_in.transpose(1, 2)).transpose(1, 2)
 
-                    # 在 forward 中进行 adaptive 相加
-                    if patch_mask is not None:   
-                        x = x * (1 - patch_mask) + c_out * patch_mask
-                    else:
-                        x = x + c_out
+            #         # 在 forward 中进行 adaptive 相加
+            #         if patch_mask is not None:   
+            #             x = x * (1 - patch_mask) + c_out * patch_mask
+            #         else:
+            #             x = x + c_out
+        if self.use_event_control and event_voxel is not None:
+            f_event = self.enc_blocks_trainable(event_voxel)
+
 
         x = self.enc_norm(x)
         return x, pos, None
