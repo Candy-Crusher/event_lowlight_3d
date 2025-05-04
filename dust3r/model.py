@@ -19,6 +19,7 @@ from third_party.raft import load_RAFT
 import dust3r.utils.path_to_croco  # noqa: F401
 from models.croco import CroCoNet  # noqa
 from .event_model import create_model
+from .event_model.fusion import ImageEventFusion, check_shape_consistency
 
 import cv2
 import torch.nn.functional as F
@@ -115,11 +116,13 @@ class AsymmetricCroCo3DStereo (
         # Trainable copy
         # self.enc_blocks_trainable = nn.ModuleList([deepcopy(blk) for blk in self.enc_blocks])
         self.enc_blocks_trainable = create_model()
+        self.fusion_module = ImageEventFusion(event_channels=768, target_channels=1024, target_hw=(18, 32))
 
         # Set all parameters of the SWINPad model to trainable
         for param in self.enc_blocks_trainable.parameters():
             param.requires_grad = True
-        
+        for param in self.fusion_module.parameters():
+            param.requires_grad = True
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kw):
@@ -197,19 +200,15 @@ class AsymmetricCroCo3DStereo (
         # Apply transformer encoder blocks with event control
         for i, blk in enumerate(self.enc_blocks):
             x = blk(x, posvis)
-            # if self.use_event_control and event_voxel is not None:
-            #     c_in = self.enc_blocks_trainable[i](c_in, posvis)
-            #     if i==len(self.enc_blocks)-1:
-            #         c_out = self.enc_zero_conv_out(c_in.transpose(1, 2)).transpose(1, 2)
-
-            #         # 在 forward 中进行 adaptive 相加
-            #         if patch_mask is not None:   
-            #             x = x * (1 - patch_mask) + c_out * patch_mask
-            #         else:
-            #             x = x + c_out
+            # 24 blocks, each output shape is [2, 576, 1024]
         if self.use_event_control and event_voxel is not None:
             f_event = self.enc_blocks_trainable(event_voxel)
-
+            # [2, 96, 72, 128]
+            # [2, 192, 36, 64
+            # [2, 384, 18, 32]
+            # [2, 768, 9, 16]
+            x = self.fusion_module(x, f_event,true_shape)
+            
 
         x = self.enc_norm(x)
         return x, pos, None

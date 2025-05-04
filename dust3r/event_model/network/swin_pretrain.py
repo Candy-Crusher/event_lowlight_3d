@@ -565,6 +565,7 @@ class SWIN(nn.Module):
                     outs.append(self.fpns[i](out))
                 else:
                     outs.append(x_out)
+                print(f"event outs {i} shape: {outs[-1].shape}")
                 
 
         outs = sum(outs).flatten(2).transpose(1, 2) / len(outs)
