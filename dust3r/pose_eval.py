@@ -85,6 +85,12 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
             filelist = [os.path.join(dir_path, name) for name in os.listdir(dir_path)]
             filelist.sort()
             filelist = filelist[::args.pose_eval_stride]
+            event_filelist = None
+            if args.use_event_control:
+                event_path = metadata['event_path_func'](img_path, seq)
+                event_filelist = [os.path.join(event_path, name) for name in os.listdir(event_path)]
+                event_filelist.sort()
+                event_filelist = event_filelist[::args.pose_eval_stride]
             max_winsize = max(1, math.ceil((len(filelist)-1)/2))
             scene_graph_type = args.scene_graph_type
             if int(scene_graph_type.split('-')[1]) > max_winsize:
@@ -93,7 +99,8 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
                     scene_graph_type += f'-{args.scene_graph_type.split("-")[2]}'
             imgs = load_images(
                 filelist, size=load_img_size, verbose=False,
-                dynamic_mask_root=mask_path_seq, crop=not args.no_crop
+                dynamic_mask_root=mask_path_seq, crop=not args.no_crop,
+                event_filelist=event_filelist
             )
             print(f'Loaded {len(imgs)} images from {seq}.')
             if args.eval_dataset == 'davis' and len(imgs) > 95:

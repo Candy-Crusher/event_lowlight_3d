@@ -26,6 +26,8 @@ class ImageEventFusion(nn.Module):
     def __init__(self, event_channels=768, target_channels=1024, target_hw=(24, 24)):
         super().__init__()
         self.conv_adjust = nn.Conv2d(event_channels, target_channels, kernel_size=1)  # 调整通道数
+        self.attention = nn.MultiheadAttention(embed_dim=target_channels, num_heads=8)
+        self.norm = nn.LayerNorm(target_channels)
 
     def forward(self, x, f_event, true_shape):
         event_feat = f_event[-1]
@@ -38,5 +40,20 @@ class ImageEventFusion(nn.Module):
         B, C, H, W = event_feat.size()
         event_feat = event_feat.view(B, C, H * W).transpose(1, 2)
 
-        x = x + event_feat
+        # x = x + event_feat
+
+        # Cross-Attention
+        # x 作为 query，event_feat 作为 key 和 value
+        # 为了 MultiheadAttention，调整维度为 [seq_len, batch, embed_dim]
+        x = x.transpose(0, 1)  # [576, 2, 1024]
+        event_feat = event_feat.transpose(0, 1)  # [576, 2, 1024]
+
+        # 计算注意力
+        attn_output, _ = self.attention(query=x, key=event_feat, value=event_feat)
+
+        # 恢复维度
+        attn_output = attn_output.transpose(0, 1)  # [2, 576, 1024]
+
+        # 残差连接并归一化
+        x = self.norm(x.transpose(0, 1) + attn_output)  # [2, 576, 1024]
         return x

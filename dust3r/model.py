@@ -238,6 +238,7 @@ class AsymmetricCroCo3DStereo (
             LL_mask1 = LL_mask2 = None
         event_voxel1 = view1.get('event_voxel')
         event_voxel2 = view2.get('event_voxel')
+        # assert event_voxel1 is not None and event_voxel2 is not None, "Event voxel data is required for both views."
         B = img1.shape[0]
 
         # Recover true_shape when available, otherwise assume that the img shape is the true one

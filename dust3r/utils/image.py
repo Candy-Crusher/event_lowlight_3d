@@ -25,6 +25,8 @@ try:
 except ImportError:
     heif_support_enabled = False
 
+from dust3r.utils.event import read_voxel_hdf5,crop_event
+
 ImgNorm = tvf.Compose([tvf.ToTensor(), tvf.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 ToTensor = tvf.ToTensor()
 TAG_FLOAT = 202021.25
@@ -198,7 +200,7 @@ def crop_img(img, size, square_ok=False, nearest=False, crop=True):
             img = img.resize((2*halfw, 2*halfh), PIL.Image.LANCZOS)
     return img
 
-def load_images(folder_or_list, size, square_ok=False, verbose=True, dynamic_mask_root=None, crop=True, fps=0, num_frames=110, imgs=None):
+def load_images(folder_or_list, size, square_ok=False, verbose=True, dynamic_mask_root=None, crop=True, fps=0, num_frames=110, imgs=None,event_filelist=None):
     """Open and convert all images or videos in a list or folder to proper input format for DUSt3R."""
     if imgs is None:
         imgs = []
@@ -228,7 +230,7 @@ def load_images(folder_or_list, size, square_ok=False, verbose=True, dynamic_mas
 
     # Sort items by their names
     folder_content = sorted(folder_content, key=lambda x: x.split('/')[-1])
-    for path in folder_content:
+    for i, path in enumerate(folder_content):
         full_path = os.path.join(root, path)
         if path.lower().endswith(supported_images_extensions):
             # Process image files
@@ -247,7 +249,15 @@ def load_images(folder_or_list, size, square_ok=False, verbose=True, dynamic_mas
                 instance=full_path,
                 mask=~(ToTensor(img)[None].sum(1) <= 0.01)
             )
+            # Process event data if available
+            if event_filelist is not None:
+                event_path = event_filelist[i]
+                event_voxel = read_voxel_hdf5(event_path)
             
+                event_voxel = torch.from_numpy(event_voxel).float()
+                event_voxel = crop_event(event_voxel, size, square_ok=square_ok, crop=crop, mode='bilinear')
+                single_dict['event_voxel'] = event_voxel[None]
+
             if dynamic_mask_root is not None:
                 dynamic_mask_path = os.path.join(dynamic_mask_root, os.path.basename(path))
             else:  # Sintel dataset handling
