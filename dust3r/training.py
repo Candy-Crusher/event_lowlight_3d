@@ -39,7 +39,8 @@ def get_args_parser():
     # model and criterion
     parser.add_argument('--model', default="AsymmetricCroCo3DStereo(pos_embed='RoPE100', patch_embed_cls='ManyAR_PatchEmbed', \
                         img_size=(512, 512), head_type='dpt', output_mode='pts3d', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), \
-                        enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, freeze='encoder_and_decoder')",
+                        enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, freeze='encoder', \
+                        use_event_control=${use_event_control})",
                         type=str, help="string containing the model to build")
     parser.add_argument('--pretrained', default=None, help='path of a starting checkpoint')
     parser.add_argument('--train_criterion', default="ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)",
@@ -120,6 +121,8 @@ def get_args_parser():
                     choices=['mvsec','davis', 'kitti', 'bonn', 'scannet', 'tum', 'nyu', 'sintel'], 
                     help='choose dataset for pose evaluation')
 
+    parser.add_argument('--use_event_control', action='store_true', default=False, help='evaluate wE for pose evaluation')
+
     # for monocular depth eval
     parser.add_argument('--no_crop', action='store_true', default=False, help='do not crop the image for monocular depth evaluation')
 
@@ -129,8 +132,10 @@ def get_args_parser():
 
 def load_model(args, device):
     # model
-    print('Loading model: {:s}'.format(args.model))
-    model = eval(args.model)
+    use_event_control_value = str(args.use_event_control)
+    model_config = args.model.replace('${use_event_control}', use_event_control_value)  
+    print('Loading model: {:s}'.format(model_config))
+    model = eval(model_config)
     model.to(device)
     model_without_ddp = model
     if args.pretrained and not args.resume:

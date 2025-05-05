@@ -20,6 +20,11 @@ from dust3r.lightup_net import EvLightEnhancer
 
 import dust3r.utils.path_to_croco  # noqa: F401
 from models.croco import CroCoNet  # noqa
+from .event_model import create_model
+from .event_model.fusion import ImageEventFusion, check_shape_consistency
+
+import cv2
+import torch.nn.functional as F
 
 inf = float('inf')
 
@@ -114,7 +119,7 @@ class AsymmetricCroCo3DStereo (
                  freeze='none',
                  landscape_only=True,
                  patch_embed_cls='PatchEmbedDust3R',  # PatchEmbedDust3R or ManyAR_PatchEmbed
-                 use_event_control=False,  # Flag to enable event control
+                 use_event_control=True,  # Flag to enable event control
                  event_in_channels=5,    # Event voxel input channels
                  use_lowlight_enhancer=False,  # Flag to enable EvLightEnhancer
                  use_cross_attention_for_event=False,  # Flag to enable cross attention in event encoder
@@ -150,10 +155,24 @@ class AsymmetricCroCo3DStereo (
                 event_channels=event_in_channels
             )
 
+            self.patch_size = croco_kwargs.get('patch_size', 16)
+            self.ll_threshold_ratio = 0.5
     def zero_module(self, module):
         for p in module.parameters():
             nn.init.zeros_(p)
         return module
+
+    def masks_to_patch_masks(self, masks):
+        B, H, W = masks.shape
+        # 将掩码二值化（255 -> 1, 0 -> 0）
+        masks = (masks == 255).float()
+        # 使用avg_pool2d计算每个补丁的低光像素比例
+        patch_masks = F.avg_pool2d(masks.unsqueeze(1), kernel_size=self.patch_size, stride=self.patch_size)  # 形状: (B, 1, H/P, W/P)
+        patch_masks = patch_masks.squeeze(1).flatten(1)  # 形状: (B, N)，N=(H/P)*(W/P)
+        # 应用阈值，生成二值补丁掩码
+        patch_masks = (patch_masks >= self.ll_threshold_ratio).float()  # 形状: (B, N)
+        patch_masks = patch_masks.unsqueeze(2)  # 形状: (B, N, 1)
+        return patch_masks
 
     def _init_event_control(self, img_size, patch_size, enc_embed_dim, dec_embed_dim):
         """ Initialize modules for processing event voxel data and injecting it into the network. """
@@ -276,7 +295,7 @@ class AsymmetricCroCo3DStereo (
         self.head1 = transpose_to_landscape(self.downstream_head1, activate=landscape_only)
         self.head2 = transpose_to_landscape(self.downstream_head2, activate=landscape_only)
 
-    def _encode_image(self, image, true_shape, event_voxel=None):
+    def _encode_image(self, image, true_shape, event_voxel=None, LL_mask=None):
         # 初始化SNR map为None
         snr_map = None
         
@@ -379,25 +398,32 @@ class AsymmetricCroCo3DStereo (
         x = self.enc_norm(x)
         return x, pos, None
 
-    def _encode_image_pairs(self, img1, img2, true_shape1, true_shape2, event_voxel1=None, event_voxel2=None):
+    def _encode_image_pairs(self, img1, img2, true_shape1, true_shape2, event_voxel1=None, event_voxel2=None, LL_mask1=None, LL_mask2=None):
         if img1.shape[-2:] == img2.shape[-2:]:
             out, pos, _ = self._encode_image(
                 torch.cat((img1, img2), dim=0),
                 torch.cat((true_shape1, true_shape2), dim=0),
-                torch.cat((event_voxel1, event_voxel2), dim=0) if event_voxel1 is not None else None
+                torch.cat((event_voxel1, event_voxel2), dim=0) if event_voxel1 is not None else None,
+                torch.cat((LL_mask1, LL_mask2), dim=0) if LL_mask1 is not None else None,
             )
             out, out2 = out.chunk(2, dim=0)
             pos, pos2 = pos.chunk(2, dim=0)
         else:
-            out, pos, _ = self._encode_image(img1, true_shape1, event_voxel1)
-            out2, pos2, _ = self._encode_image(img2, true_shape2, event_voxel2)
+            out, pos, _ = self._encode_image(img1, true_shape1, event_voxel1, LL_mask1 if LL_mask1 is not None else None)
+            out2, pos2, _ = self._encode_image(img2, true_shape2, event_voxel2, LL_mask2 if LL_mask2 is not None else None)
         return out, out2, pos, pos2
 
     def _encode_symmetrized(self, view1, view2):
         img1 = view1['img']
         img2 = view2['img']
+        if 'low_light_mask' in view1:
+            LL_mask1 = view1['low_light_mask']
+            LL_mask2 = view2['low_light_mask']
+        else:
+            LL_mask1 = LL_mask2 = None
         event_voxel1 = view1.get('event_voxel')
         event_voxel2 = view2.get('event_voxel')
+        # assert event_voxel1 is not None and event_voxel2 is not None, "Event voxel data is required for both views."
         B = img1.shape[0]
 
         # Recover true_shape when available, otherwise assume that the img shape is the true one
@@ -410,13 +436,19 @@ class AsymmetricCroCo3DStereo (
             feat1, feat2, pos1, pos2 = self._encode_image_pairs(
                 img1[::2], img2[::2], shape1[::2], shape2[::2],
                 event_voxel1[::2] if event_voxel1 is not None else None,
-                event_voxel2[::2] if event_voxel2 is not None else None
+                event_voxel2[::2] if event_voxel2 is not None else None,
+                LL_mask1[::2] if LL_mask1 is not None else None,
+                LL_mask2[::2] if LL_mask2 is not None else None
             )
             feat1, feat2 = interleave(feat1, feat2)
             pos1, pos2 = interleave(pos1, pos2)
         else:
             feat1, feat2, pos1, pos2 = self._encode_image_pairs(
-                img1, img2, shape1, shape2, event_voxel1, event_voxel2
+                img1, img2, shape1, shape2, 
+                event_voxel1 if event_voxel1 is not None else None, 
+                event_voxel2 if event_voxel2 is not None else None,
+                LL_mask1 if LL_mask1 is not None else None,
+                LL_mask2 if LL_mask2 is not None else None
             )
 
         return (shape1, shape2), (feat1, feat2), (pos1, pos2)

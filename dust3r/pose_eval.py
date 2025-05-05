@@ -85,6 +85,12 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
             filelist = [os.path.join(dir_path, name) for name in os.listdir(dir_path)]
             filelist.sort()
             filelist = filelist[::args.pose_eval_stride]
+            event_filelist = None
+            if args.use_event_control:
+                event_path = metadata['event_path_func'](img_path, seq)
+                event_filelist = [os.path.join(event_path, name) for name in os.listdir(event_path)]
+                event_filelist.sort()
+                event_filelist = event_filelist[::args.pose_eval_stride]
             max_winsize = max(1, math.ceil((len(filelist)-1)/2))
             scene_graph_type = args.scene_graph_type
             if int(scene_graph_type.split('-')[1]) > max_winsize:
@@ -93,7 +99,8 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
                     scene_graph_type += f'-{args.scene_graph_type.split("-")[2]}'
             imgs = load_images(
                 filelist, size=load_img_size, verbose=False,
-                dynamic_mask_root=mask_path_seq, crop=not args.no_crop
+                dynamic_mask_root=mask_path_seq, crop=not args.no_crop,
+                event_filelist=event_filelist
             )
             print(f'Loaded {len(imgs)} images from {seq}.')
             if args.eval_dataset == 'davis' and len(imgs) > 95:
@@ -103,6 +110,7 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
                 imgs, scene_graph=scene_graph_type, prefilter=None, symmetrize=True
             ) 
 
+            # import ipdb; ipdb.set_trace()
             output = inference(pairs, model, device, batch_size=1, verbose=not silent)
 
             with torch.enable_grad():
@@ -117,7 +125,7 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
                         num_total_iter=args.n_iter, temporal_smoothing_weight=args.temporal_smoothing_weight, motion_mask_thre=args.motion_mask_thre,
                         flow_loss_start_epoch=args.flow_loss_start_epoch, flow_loss_thre=args.flow_loss_thre, translation_weight=args.translation_weight,
                         sintel_ckpt=args.eval_dataset == 'sintel', use_self_mask=not args.use_gt_mask, sam2_mask_refine=args.sam2_mask_refine,
-                        empty_cache=len(imgs) >= 80 and len(pairs) > 600, pxl_thre=args.pxl_thresh, # empty cache to make it run on 48GB GPU
+                        empty_cache=len(imgs) >= 40 and len(pairs) > 300, pxl_thre=args.pxl_thresh, # empty cache to make it run on 48GB GPU
                     )
                     if args.use_gt_focal:
                         focal_path = os.path.join(
