@@ -20,6 +20,7 @@ import dust3r.utils.path_to_croco  # noqa: F401
 from models.croco import CroCoNet  # noqa
 from .event_model import create_model
 from .event_model.fusion import ImageEventFusion, check_shape_consistency
+from .event_model.lightup_net import EvLightEnhancer
 
 import cv2
 import torch.nn.functional as F
@@ -70,10 +71,18 @@ class AsymmetricCroCo3DStereo (
                  patch_embed_cls='PatchEmbedDust3R',  # PatchEmbedDust3R or ManyAR_PatchEmbed
                  use_event_control=True,  # Flag to enable event control
                  event_in_channels=5,    # Event voxel input channels
+                 use_lowlight_enhancer=False,  # Flag to enable EvLightEnhancer
+                 use_cross_attention_for_event=False,  # Flag to enable cross attention in event encoder
+                 event_enhance_mode='none',  # 'none', 'easy', or 'complex'
                  **croco_kwargs):
         self.patch_embed_cls = patch_embed_cls
         self.use_event_control = use_event_control
         self.event_in_channels = event_in_channels
+
+        self.use_lowlight_enhancer = use_lowlight_enhancer
+        self.use_cross_attention_for_event = use_cross_attention_for_event
+        self.event_enhance_mode = event_enhance_mode
+
         self.croco_args = fill_default_args(croco_kwargs, super().__init__)
         super().__init__(**croco_kwargs)
 
@@ -118,11 +127,19 @@ class AsymmetricCroCo3DStereo (
         self.enc_blocks_trainable = create_model()
         self.fusion_module = ImageEventFusion(event_channels=768, target_channels=1024, target_hw=(18, 32))
 
-        # Set all parameters of the SWINPad model to trainable
-        for param in self.enc_blocks_trainable.parameters():
-            param.requires_grad = True
-        for param in self.fusion_module.parameters():
-            param.requires_grad = True
+        # # Set all parameters of the SWINPad model to trainable
+        # for param in self.enc_blocks_trainable.parameters():
+        #     param.requires_grad = True
+        
+        # Low-light enhancer initialization
+        if self.use_lowlight_enhancer:
+            print("Initializing EvLightEnhancer for low-light image enhancement")
+            print(f"Enhancement mode: {self.event_enhance_mode}")
+            self.enhancer = EvLightEnhancer(
+                mode=self.event_enhance_mode,
+                image_channels=3, 
+                event_channels=self.event_in_channels,
+            )
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kw):
@@ -179,6 +196,13 @@ class AsymmetricCroCo3DStereo (
         self.head2 = transpose_to_landscape(self.downstream_head2, activate=landscape_only)
 
     def _encode_image(self, image, true_shape, event_voxel=None, LL_mask=None):
+
+        if self.use_lowlight_enhancer:
+            image, snr_map = self.enhancer(image, event_voxel)
+        else:
+            snr_map = None
+
+
         # embed the image into patches  (x has size B x Npatches x C)
         x, pos = self.patch_embed(image, true_shape=true_shape)
         # x (B, 576, 1024) pos (B, 576, 2); patch_size=16
@@ -207,7 +231,7 @@ class AsymmetricCroCo3DStereo (
             # [2, 192, 36, 64
             # [2, 384, 18, 32]
             # [2, 768, 9, 16]
-            x = self.fusion_module(x, f_event,true_shape)
+            x = self.fusion_module(x, f_event,true_shape,snr_map)
             
 
         x = self.enc_norm(x)

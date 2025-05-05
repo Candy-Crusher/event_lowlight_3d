@@ -28,8 +28,9 @@ class ImageEventFusion(nn.Module):
         self.conv_adjust = nn.Conv2d(event_channels, target_channels, kernel_size=1)  # 调整通道数
         self.attention = nn.MultiheadAttention(embed_dim=target_channels, num_heads=8)
         self.norm = nn.LayerNorm(target_channels)
+        self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x, f_event, true_shape):
+    def forward(self, x, f_event, true_shape, snr_map=None):
         event_feat = f_event[-1]
 
         upsample_layer = nn.Upsample(size=(true_shape[0][0].item() // 16, true_shape[0][1].item() // 16), mode='bilinear', align_corners=False)
@@ -39,6 +40,14 @@ class ImageEventFusion(nn.Module):
 
         B, C, H, W = event_feat.size()
         event_feat = event_feat.view(B, C, H * W).transpose(1, 2)
+
+        if snr_map is not None:
+            snr_map = upsample_layer(snr_map).view(B, 1, H * W).transpose(1, 2)  # [B, H*W, 1]
+            snr_weight = self.sigmoid(snr_map)
+
+            x = x * snr_weight
+            event_feat = event_feat*(1 - snr_weight)
+
 
         # x = x + event_feat
 
