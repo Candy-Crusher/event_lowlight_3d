@@ -27,20 +27,25 @@ def eval_mono_depth_estimation(args, model, device):
     if process_func is None:
         raise ValueError(f"No processing function defined for dataset: {args.eval_dataset}")
     
-    for filelist, save_dir in process_func(args, img_path):
+    for filelist, save_dir, event_filelist in process_func(args, img_path):
         Path(save_dir).mkdir(parents=True, exist_ok=True)
-        eval_mono_depth(args, model, device, filelist, save_dir=save_dir)
+        eval_mono_depth(args, model, device, filelist, save_dir=save_dir,event_filelist=event_filelist)
 
 
-def eval_mono_depth(args, model, device, filelist, save_dir=None):
+def eval_mono_depth(args, model, device, filelist, save_dir=None,event_filelist=None):
     model.eval()
     load_img_size = 512
-    for file in tqdm(filelist):
+    print(f"Evaluating {len(event_filelist)} images", len(filelist))
+    for index, file in enumerate(tqdm(filelist)):
         # construct the "image pair" for the single image
         file = [file]
-        imgs = load_images(file, size=load_img_size, verbose=False, crop= not args.no_crop)
+        event_file = [event_filelist[index]] if event_filelist is not None else None
+        imgs = load_images(file, size=load_img_size, verbose=False, crop= not args.no_crop,event_filelist=event_file)
         imgs = [imgs[0], deepcopy(imgs[0])]
         imgs[1]['idx'] = 1
+
+        if args.use_event_control:
+            assert 'event_voxel' in imgs[0], "Event voxel not found in the image dictionary"
 
         pairs = make_pairs(imgs, symmetrize=True, prefilter=None)
         output = inference(pairs, model, device, batch_size=1, verbose=False)

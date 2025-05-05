@@ -21,6 +21,7 @@ from models.croco import CroCoNet  # noqa
 from .event_model import create_model
 from .event_model.fusion import ImageEventFusion, check_shape_consistency
 from .event_model.lightup_net import EvLightEnhancer
+from .visualization import visualize_image_snr, visualize_feature
 
 import cv2
 import torch.nn.functional as F
@@ -198,7 +199,9 @@ class AsymmetricCroCo3DStereo (
     def _encode_image(self, image, true_shape, event_voxel=None, LL_mask=None):
 
         if self.use_lowlight_enhancer:
+            old_image = image.clone()
             image, snr_map = self.enhancer(image, event_voxel)
+            visualize_image_snr(old_image, image, snr_map, save_path="image_snr_visualization.png")
         else:
             snr_map = None
 
@@ -222,8 +225,10 @@ class AsymmetricCroCo3DStereo (
         # TODO: where to add mask for the patches
         # now apply the transformer encoder and normalization
         # Apply transformer encoder blocks with event control
+        # visualize_feature(x, save_path=f"feature_visualization.png", true_shape=true_shape, dim=100)
         for i, blk in enumerate(self.enc_blocks):
             x = blk(x, posvis)
+            # visualize_feature(x, save_path=f"feature{i:02d}_visualization.png", true_shape=true_shape, dim=100)
             # 24 blocks, each output shape is [2, 576, 1024]
         if self.use_event_control and event_voxel is not None:
             f_event = self.enc_blocks_trainable(event_voxel)

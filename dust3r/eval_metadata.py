@@ -113,9 +113,13 @@ def process_mvsec(args, img_path):
     print(f'Processing sequences: {seq_list}')
     for seq in tqdm(seq_list):
         filelist = sorted(glob.glob(f'{img_path}/{seq}/image_left/*.png'))
+        if args.use_event_control:
+            event_filelist = sorted(glob.glob(f'{img_path}/{seq}/event_left/event_voxel_left/*.hdf5'))
+        else:
+            event_filelist = None
         # filelist = sorted(glob.glob(f'{img_path}/{seq}/seq0/image_left/*.png'))
         save_dir = f'{args.output_dir}/{seq}'
-        yield filelist, save_dir
+        yield filelist, save_dir, event_filelist
 
 def process_kitti(args, img_path):
     for dir in tqdm(sorted(glob.glob(f'{img_path}/*'))):
