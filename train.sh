@@ -1,4 +1,10 @@
-CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 --master_port=29605 launch.py  --mode=train \
+CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 --master_port=29606 launch.py  --mode=train \
+    --model="AsymmetricCroCo3DStereo(pos_embed='RoPE100', patch_embed_cls='ManyAR_PatchEmbed', \
+                        img_size=(512, 512), head_type='dpt', output_mode='pts3d', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), \
+                        enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, freeze='all', \
+                        use_event_control=True, \
+                        use_lowlight_enhancer=False, event_enhance_mode='none', \
+                        use_cross_attention_for_event=True)" \
     --train_dataset="5_000 @ MVSEC(dset='train', z_far=80, dataset_location='data/MVSEC/processed_raw/outdoor_day/outdoor_day2', S=2, aug_crop=16, resolution=[(512, 288), (512, 384), (512, 336)], transform=ColorJitter, strides=[1,2,3,4,5,6,7,8,9], dist_type='linear_1_2', aug_focal=0.9)"   \
     --test_dataset="1811 @ MVSEC(dset='test', z_far=80, dataset_location='data/MVSEC/processed_raw/outdoor_day/outdoor_day2', S=2, strides=[1,2,3,4,5,6,7,8,9], resolution=[(512, 288)], seed=777)"   \
     --train_criterion="ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)"  \
@@ -6,7 +12,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 --master_port=29605 lau
     --pretrained="checkpoints/MonST3R_PO-TA-S-W_ViTLarge_BaseDecoder_512_dpt.pth"   \
     --lr=0.00005 --min_lr=1e-06 --warmup_epochs=3 --epochs=50 --batch_size=1 --accum_iter=4  \
     --save_freq=3 --keep_freq=5 --eval_freq=1  \
-    --output_dir="/mnt/sdc/xswu/3d/code/results/MonST3R_PO-TA-S-W_ViTLarge_BaseDecoder_512_dpt_tartanair_raw_wE" \
+    --output_dir="results/MonST3R_EventControl_LowLight_NoFusion_wCA" \
     --wandb
     # --pretrained="checkpoints/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth"   \
     # --train_dataset="5_000 @ TarTanAirDUSt3R(dset='train', z_far=80, dataset_location='data/tartanair', S=2, aug_crop=16, resolution=[(512, 288), (512, 384), (512, 336)], transform=ColorJitter, strides=[1,2,3,4,5,6,7,8,9], dist_type='linear_1_2', aug_focal=0.9)"   \
