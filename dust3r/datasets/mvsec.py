@@ -50,7 +50,7 @@ class MVSEC(BaseStereoViewDataset):
                  ):
 
         TRAIN_RANGE = [17,8541]
-        TEST_REANGE = [10368, 12179]
+        TEST_REANGE = [10368, 12194]
         print('loading mvsec dataset...')
         super().__init__(*args, **kwargs)
         self.dataset_label = 'mvsec'
@@ -82,7 +82,7 @@ class MVSEC(BaseStereoViewDataset):
             if self.verbose: 
                 print('seq', seq)
 
-            rgb_path = os.path.join(seq, 'image_left')
+            rgb_path = os.path.join(seq, 'image_left_interpolated')
             event_voxel_path = os.path.join(seq, 'event_left', 'event_voxel_left')
             depth_path = os.path.join(seq, 'depth_left')
             caminfo_path = os.path.join(seq, 'odem_c2wpose_left.txt')

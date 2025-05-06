@@ -204,7 +204,7 @@ class AsymmetricCroCo3DStereo (
         if self.use_lowlight_enhancer:
             old_image = image.clone()
             image, snr_map = self.enhancer(image, event_voxel)
-            # visualize_image_snr(old_image, image, snr_map, save_path="image_snr_visualization.png")
+            # visualize_image_snr(old_image, image, snr_map, save_path="visualization/image_snr_visualization.png")
         else:
             snr_map = None
 
