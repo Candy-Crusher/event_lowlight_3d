@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.distributed import all_reduce, ReduceOp
+import math
 from ..visualization import visualize_tensors
 
 def check_shape_consistency(tensor, name):
@@ -72,17 +73,17 @@ class CrossAttention(nn.Module):
         return x
 
 class ImageEventFusion(nn.Module):
-    def __init__(self, event_channels=768, target_channels=1024, target_hw=(24, 24)):
+    def __init__(self, event_channels=768, target_channels=1024):
         super().__init__()
         self.conv_adjust = nn.Conv2d(event_channels, target_channels, kernel_size=1)  # 调整通道数
         self.attention = nn.MultiheadAttention(embed_dim=target_channels, num_heads=8)
         self.norm = nn.LayerNorm(target_channels)
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x, f_event, true_shape, snr_map=None):
-        event_feat = f_event[-1]
+    def forward(self, x, event_feat, true_shape, snr_map=None,event_blk_idx=None):
+        scale = int(math.sqrt(true_shape[0][0].item()*true_shape[0][1].item()/x.shape[1]))
 
-        upsample_layer = nn.Upsample(size=(true_shape[0][0].item() // 16, true_shape[0][1].item() // 16), mode='bilinear', align_corners=False)
+        upsample_layer = nn.Upsample(size=(true_shape[0][0].item() // scale, true_shape[0][1].item() // scale), mode='bilinear', align_corners=False)
         event_feat = upsample_layer(event_feat)
 
         event_feat = self.conv_adjust(event_feat)
@@ -117,7 +118,5 @@ class ImageEventFusion(nn.Module):
         # 残差连接并归一化
         x = self.norm(x.transpose(0, 1) + attn_output)  # [2, 576, 1024]
 
-        # visualize_tensors(old_x, old_event_feat, snr_map, attn_output, save_path="tensor_visualization.png",true_shape=true_shape)
-        visualize_tensors(old_x, old_event_feat, snr_map, attn_output, save_path="tensor_visualization.png",true_shape=true_shape)
-        exit(0)
+        # visualize_tensors(old_x, old_event_feat, snr_map, attn_output, save_path=f"tensor{event_blk_idx}_visualization.png",true_shape=true_shape)
         return x

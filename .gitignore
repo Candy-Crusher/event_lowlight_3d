@@ -1,5 +1,6 @@
 data/*/
 data
+visualization/
 *checkpoints/
 checkpoints
 demo_tmp

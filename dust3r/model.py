@@ -126,7 +126,10 @@ class AsymmetricCroCo3DStereo (
         # Trainable copy
         # self.enc_blocks_trainable = nn.ModuleList([deepcopy(blk) for blk in self.enc_blocks])
         self.enc_blocks_trainable = create_model()
-        self.fusion_module = ImageEventFusion(event_channels=768, target_channels=1024, target_hw=(18, 32))
+        event_channels = [96, 192, 384, 768]
+        self.fusion_module = nn.ModuleList(
+            [ImageEventFusion(event_channels=event_channels[i], target_channels=1024) for i in range(4)]
+        )
 
         # # Set all parameters of the SWINPad model to trainable
         # for param in self.enc_blocks_trainable.parameters():
@@ -201,7 +204,7 @@ class AsymmetricCroCo3DStereo (
         if self.use_lowlight_enhancer:
             old_image = image.clone()
             image, snr_map = self.enhancer(image, event_voxel)
-            visualize_image_snr(old_image, image, snr_map, save_path="image_snr_visualization.png")
+            # visualize_image_snr(old_image, image, snr_map, save_path="image_snr_visualization.png")
         else:
             snr_map = None
 
@@ -226,18 +229,19 @@ class AsymmetricCroCo3DStereo (
         # now apply the transformer encoder and normalization
         # Apply transformer encoder blocks with event control
         # visualize_feature(x, save_path=f"feature_visualization.png", true_shape=true_shape, dim=100)
-        for i, blk in enumerate(self.enc_blocks):
-            x = blk(x, posvis)
-            # visualize_feature(x, save_path=f"feature{i:02d}_visualization.png", true_shape=true_shape, dim=100)
-            # 24 blocks, each output shape is [2, 576, 1024]
         if self.use_event_control and event_voxel is not None:
             f_event = self.enc_blocks_trainable(event_voxel)
             # [2, 96, 72, 128]
             # [2, 192, 36, 64
             # [2, 384, 18, 32]
             # [2, 768, 9, 16]
-            x = self.fusion_module(x, f_event,true_shape,snr_map)
-            
+        for i, blk in enumerate(self.enc_blocks):
+            x = blk(x, posvis)
+            # visualize_feature(x, save_path=f"feature{i:02d}_visualization.png", true_shape=true_shape, dim=100)
+            # 24 blocks, each output shape is [2, 576, 1024]
+            if (i+1) % (len(self.enc_blocks)/4) == 0:
+                event_blk_idx = int((i+1) / (len(self.enc_blocks)/4)) - 1
+                x = self.fusion_module[event_blk_idx](x, f_event[event_blk_idx],true_shape,snr_map,event_blk_idx)
 
         x = self.enc_norm(x)
         return x, pos, None

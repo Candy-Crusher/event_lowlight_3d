@@ -14,8 +14,8 @@ CUDA_VISIBLE_DEVICES=4 torchrun --nproc_per_node=1 --master_port=29609 launch.py
     --seq_list="outdoor_night/outdoor_night1" \
     --output_dir="/mnt/sdc/xswu/3d/code/results/$experiment_name" \
     --use_event_control \
-    # --use_lowlight_enhancer \
-    # --event_enhance_mode="easy" \
+    --use_lowlight_enhancer \
+    --event_enhance_mode="easy" \
     # To use the ground truth dynamic mask for davis, add: --use_gt_mask
     # --pretrained="/mnt/sdc/xswu/3d/code/results/$experiment_name/checkpoint-best.pth"   \
     # --eval_dataset=mvsec --output_dir="/mnt/sdc/xswu/3d/code/results/$experiment_name" 
