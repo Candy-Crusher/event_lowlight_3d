@@ -62,7 +62,7 @@ def visualize_feature(image_feature, save_path="visualization.png", true_shape=N
     plt.close()
     print(f"Visualization saved to {save_path}")
 
-def visualize_tensors(x, event_feat, snr_map, output_x, save_path="visualization.png", true_shape=None):
+def visualize_tensors_snr(x, event_feat, snr_map, output_x, save_path="visualization.png", true_shape=None):
     """
     可视化 x, event_feat, snr_map 和 output_x 的张量，只显示第一个维度，reshape 为 [H, W]。
 
@@ -139,6 +139,94 @@ def visualize_tensors(x, event_feat, snr_map, output_x, save_path="visualization
         plt.colorbar(im2, ax=axes[2])
     else:
         axes[2].axis('off')
+
+    # 可视化 output_x（热图）
+    im3 = axes[3].imshow(output_x_vis, cmap='viridis')
+    axes[3].set_title('Output x (dim 0)')
+    axes[3].set_xlabel('Width')
+    axes[3].set_ylabel('Height')
+    plt.colorbar(im3, ax=axes[3])
+
+    # 手动调整间距
+    plt.subplots_adjust(wspace=0.3, hspace=0.3)
+
+    # 保存图像
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Visualization saved to {save_path}")
+
+def visualize_tensors(x, event_feat, atten, output_x, save_path="visualization.png", true_shape=None):
+    """
+    可视化 x, event_feat, snr_map 和 output_x 的张量，只显示第一个维度，reshape 为 [H, W]。
+
+    参数:
+    - x: 初始输入张量, 形状 [batch, seq_len, embed_dim]
+    - event_feat: 事件特征张量, 形状与 x 一致
+    - atten: 注意力图, 形状与 x 一致
+    - output_x: 最终输出张量, 形状与 x 一致
+    - save_path: 保存图像的路径, 默认 "visualization.png"
+    - true_shape: 真实形状, 形状 [batch, 2]，例如 [[height, width]]
+    """
+    # 选择第一个 batch 的数据
+    batch_idx = 0
+    if true_shape is None:
+        raise ValueError("true_shape must be provided for reshaping")
+    resize_shape = (true_shape[batch_idx][0].item() // 16, true_shape[batch_idx][1].item() // 16)
+    H, W = resize_shape
+    seq_len = H * W
+
+    # 提取第一个 batch 的数据
+    x = x[batch_idx].detach().cpu().numpy()  # [seq_len, embed_dim]
+    event_feat = event_feat[batch_idx].detach().cpu().numpy()  # [seq_len, embed_dim]
+    atten = atten[batch_idx].detach().cpu().numpy()  # [seq_len, embed_dim]
+    output_x = output_x[batch_idx].detach().cpu().numpy()  # [seq_len, embed_dim]
+    print(f"x.shape: {x.shape}, event_feat.shape: {event_feat.shape}, atten.shape: {atten.shape}, output_x.shape: {output_x.shape}")
+
+    # 验证 seq_len 匹配
+    if x.shape[0] != seq_len:
+        raise ValueError(f"seq_len ({x.shape[0]}) does not match expected H*W ({seq_len})")
+
+    # Reshape 为 [H, W]，取第一个维度
+    x_vis = x[:, 100].reshape(H, W)  # [H, W]
+    event_feat_vis = event_feat[:, 100].reshape(H, W)  # [H, W]
+    atten_vis = atten[:, 100].reshape(H, W)  # [H, W]
+    output_x_vis = output_x[:, 100].reshape(H, W)  # [H, W]
+
+    # 归一化到 [0, 1] 以便显示
+    def normalize(tensor):
+        # tensor = tensor - tensor.min()
+        # tensor = tensor / (tensor.max() + 1e-8)
+        return tensor
+
+    x_vis = normalize(x_vis)
+    event_feat_vis = normalize(event_feat_vis)
+    atten_vis = normalize(atten_vis)
+    output_x_vis = normalize(output_x_vis)
+
+    # 创建 2x2 的子图布局
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    axes = axes.flatten()
+
+    # 可视化 x（热图）
+    im0 = axes[0].imshow(x_vis, cmap='viridis')
+    axes[0].set_title('Input x (dim 0)')
+    axes[0].set_xlabel('Width')
+    axes[0].set_ylabel('Height')
+    plt.colorbar(im0, ax=axes[0])
+
+    # 可视化 event_feat（热图）
+    im1 = axes[1].imshow(event_feat_vis, cmap='viridis')
+    axes[1].set_title('Event Feature (dim 0)')
+    axes[1].set_xlabel('Width')
+    axes[1].set_ylabel('Height')
+    plt.colorbar(im1, ax=axes[1])
+
+    # 可视化 atten（热图）
+    im2 = axes[2].imshow(atten_vis, cmap='viridis')
+    axes[2].set_title('Attention Map (dim 0)')
+    axes[2].set_xlabel('Width')
+    axes[2].set_ylabel('Height')
+    plt.colorbar(im2, ax=axes[2])
 
     # 可视化 output_x（热图）
     im3 = axes[3].imshow(output_x_vis, cmap='viridis')

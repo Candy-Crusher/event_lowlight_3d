@@ -5,6 +5,7 @@ import torch.utils.checkpoint as checkpoint
 import numpy as np
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from functools import partial
+from .fusion import EventImageFusion
 
 class Mlp(nn.Module):
     """ Multilayer perceptron."""
@@ -488,6 +489,9 @@ class SWINPad(nn.Module):
                 use_checkpoint=use_checkpoint)
             self.layers.append(layer)
 
+        self.fusion_module = nn.ModuleList(
+            [EventImageFusion(event_channels=int(embed_dim * 2 ** i_layer), target_channels=1024) for i_layer in range(self.num_layers)]
+        )
         num_features = [int(embed_dim * 2 ** i) for i in range(self.num_layers)]
         self.num_features = num_features
 
@@ -583,7 +587,7 @@ class SWINPad(nn.Module):
         else:
             raise TypeError('pretrained must be a str or None')
 
-    def forward(self, x):
+    def forward(self, x, image_features, true_shape, snr_map):
         """Forward function."""
         x = self.patch_embed(x)
 
@@ -605,6 +609,7 @@ class SWINPad(nn.Module):
                 x_out = norm_layer(x_out)
 
                 out = x_out.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
+                out = self.fusion_module[i](image_features[i], out, true_shape, snr_map, i)
                 outs.append(out)
         
         if self.num_classes !=0:

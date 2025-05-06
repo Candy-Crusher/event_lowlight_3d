@@ -35,7 +35,6 @@ def eval_mono_depth_estimation(args, model, device):
 def eval_mono_depth(args, model, device, filelist, save_dir=None,event_filelist=None):
     model.eval()
     load_img_size = 512
-    print(f"Evaluating {len(event_filelist)} images", len(filelist))
     for index, file in enumerate(tqdm(filelist)):
         # construct the "image pair" for the single image
         file = [file]
