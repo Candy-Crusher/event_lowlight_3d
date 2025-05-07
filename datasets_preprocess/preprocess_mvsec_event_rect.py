@@ -3,7 +3,7 @@ import numpy as np
 from tqdm import tqdm
 import torch
 import os
-
+from concurrent.futures import ThreadPoolExecutor
 
 class EventRepresentation:
     def convert(self, x: torch.Tensor, y: torch.Tensor, pol: torch.Tensor, time: torch.Tensor):
@@ -243,7 +243,6 @@ def mvsecRectifyEvents(events, x_map, y_map):
                               & (rect_events[:, 1] <= 260)]
     return rect_events
 
-
 root_dir = '/mnt/sdc/lxy/datasets/MVSEC/OpenDataLab___MVSEC/raw/MVSEC/hdf5/'
 scenario = 'outdoor_night'
 # scenario = 'indoor_flying'
@@ -307,34 +306,50 @@ print('Delta t image:', delta_t_img.max(), delta_t_img.min(), delta_t_img.mean()
 voxel_grid = VoxelGrid(channels=5, height=260, width=346, normalize=True)
 
 event_root = save_root + 'event_left/event_voxel_left/'
+event50_root = save_root + 'event_left/event50_voxel_left/'
 event_stream_root = save_root + 'event_left/event_stream_left/'
 event_template = '_event.hdf5'
 os.makedirs(event_root, exist_ok=True)
+os.makedirs(event50_root, exist_ok=True)
 os.makedirs(event_stream_root, exist_ok=True)
 
 event_stream_path = save_root + 'event_left/' + 'all' + event_template 
+Lrect_events = np.array(mvsecRectifyEvents(Levents, Lx_map, Ly_map)) 
 with h5py.File(event_stream_path, 'w') as f: 
-    f.create_dataset('event_stream', data=Levents) 
+    f.create_dataset('event_stream', data=Lrect_events) 
 
-iter=0 
+# with h5py.File(event_stream_path, 'r') as f: 
+#     Lrect_events = f['event_stream'][:]
+
 event_indices = image_raw_event_inds[img_indices]
-for i in tqdm(range(len(event_indices)-1)): 
-    event_id_start = event_indices[i] 
-    event_id_end = event_indices[i+1] 
-    # print(f"Processing events from {event_id_start} to {event_id_end}") 
-    events = Levents[event_id_start:event_id_end] 
-    event_stream_filename = event_stream_root + f'{i:06d}_{i+1:06d}' + event_template 
-    with h5py.File(event_stream_filename, 'w') as f: 
-        f.create_dataset('event_stream', data=events) 
-    rect_events = np.array(mvsecRectifyEvents(events, Lx_map, Ly_map)) 
-    event_x = rect_events[:, 0] 
-    event_y = rect_events[:, 1] 
-    event_t = rect_events[:, 2] 
-    event_p = rect_events[:, 3] 
-    event_representation = events_to_voxel_grid(bin=5, x=event_x, y=event_y, p=event_p, t=event_t) 
-    event_filename = event_root + f'{i:06d}_{i+1:06d}' + event_template 
-    # print(f"Saving event representation to {event_filename}") 
-    # print(event_representation.shape) 
-    with h5py.File(event_filename, 'w') as f: 
-        f.create_dataset('event_voxels', data=event_representation.cpu().numpy()) 
-    iter += 1
+# 预计算时间窗口索引并保存到文件
+time_windows = []
+output_file = save_root + "event_windows_indices.txt"  # 指定输出文件路径
+with open(output_file, 'w') as f:
+    for i in tqdm(range(len(event_indices) - 1)):
+        start_ts = Levents[event_indices[i], 2]
+        end_ts = start_ts + 0.05
+        start_idx = np.searchsorted(Lrect_events[:, 2], start_ts, side='right')
+        end_idx = np.searchsorted(Lrect_events[:, 2], end_ts, side='left')
+        time_windows.append((start_idx, end_idx))
+        # 写入到文件，每行格式为 "start_idx end_idx"
+        f.write(f"{start_idx} {end_idx}\n")
+
+def process_event_chunk(i):
+    try:
+        start_idx, end_idx = time_windows[i]
+        # start_idx, end_idx = event_indices[i,i+2]
+        rect_events = Lrect_events[start_idx:end_idx]
+        event_x = rect_events[:, 0]
+        event_y = rect_events[:, 1]
+        event_t = rect_events[:, 2]
+        event_p = rect_events[:, 3]
+        event_representation = events_to_voxel_grid(bin=5, x=event_x, y=event_y, p=event_p, t=event_t)
+        event_filename = event50_root + f'{i:06d}_{i+1:06d}' + event_template
+        with h5py.File(event_filename, 'w') as f:
+            f.create_dataset('event_voxels', data=event_representation.cpu().numpy())
+    except Exception as e:
+        print(f"Error processing chunk {i}: {e}")
+
+for i in tqdm(range(len(event_indices)-1)):
+    process_event_chunk(i)

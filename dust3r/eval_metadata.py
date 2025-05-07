@@ -115,7 +115,7 @@ def process_mvsec(args, img_path):
         # filelist = sorted(glob.glob(f'{img_path}/{seq}/image_left_inpainted/*.png'))
         filelist = sorted(glob.glob(f'{img_path}/{seq}/image_left_interpolated/*.png'))
         if args.use_event_control:
-            event_filelist = sorted(glob.glob(f'{img_path}/{seq}/event_left/event_voxel_left/*.hdf5'))
+            event_filelist = sorted(glob.glob(f'{img_path}/{seq}/event_left/event50_voxel_left/*.hdf5'))
         else:
             event_filelist = None
         # filelist = sorted(glob.glob(f'{img_path}/{seq}/seq0/image_left/*.png'))
