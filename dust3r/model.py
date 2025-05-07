@@ -22,6 +22,8 @@ import dust3r.utils.path_to_croco  # noqa: F401
 from models.croco import CroCoNet  # noqa
 from .event_model import create_model
 from .event_model.fusion import ImageEventFusion, check_shape_consistency
+from .event_model.lightup_net import EvLightEnhancer
+from .visualization import visualize_image_snr, visualize_feature
 
 import cv2
 import torch.nn.functional as F
