@@ -42,7 +42,7 @@ def get_args_parser():
     parser.add_argument('--use_cross_attention_for_event', action='store_true', default=False, help='evaluate wE for pose evaluation')
     parser.add_argument('--model', default="AsymmetricCroCo3DStereo(pos_embed='RoPE100', patch_embed_cls='ManyAR_PatchEmbed', \
                         img_size=(512, 512), head_type='dpt', output_mode='pts3d', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), \
-                        enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, freeze='encoder', \
+                        enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, freeze='all', \
                         use_event_control=${use_event_control},use_lowlight_enhancer=${use_lowlight_enhancer}, event_enhance_mode='${event_enhance_mode}', \
                         use_cross_attention_for_event=${use_cross_attention_for_event})", \
                         type=str, help="string containing the model to build")

@@ -6,7 +6,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=8 --master_port=2
     --pretrained="checkpoints/MonST3R_PO-TA-S-W_ViTLarge_BaseDecoder_512_dpt.pth"   \
     --lr=5e-5 --min_lr=1e-06 --warmup_epochs=3 --epochs=50 --batch_size=1 --accum_iter=4  \
     --save_freq=3 --keep_freq=5 --eval_freq=1  \
-    --output_dir="/mnt/sdc/xswu/3d/code/results/MonST3R_PO-TA-S-W_ViTLarge_BaseDecoder_512_dpt_mvsec_rect_wE_SNRmultiatt_eventbranch_v4" \
+    --output_dir="/mnt/sdc/xswu/3d/code/results/MonST3R_PO-TA-S-W_ViTLarge_BaseDecoder_512_dpt_mvsec_rect_wE_SNRmultiatt_eventbranch_v5" \
     --wandb \
     --use_event_control \
     --use_lowlight_enhancer \

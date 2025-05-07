@@ -114,11 +114,15 @@ class MVSEC(BaseStereoViewDataset):
                     sys.stdout.write('.')
                     sys.stdout.flush()
 
-        
-        fx = 223.9940010790056      # focal length x
-        fy = 223.61783486959376     # focal length y
-        cx = 170.7684322973841      # optical center x
-        cy = 128.18711828338436     # optical center y
+        if 'outdoor_night' in seq:
+            intrinsics=[225.7028124771077, 225.3928747331328, 167.3925764568589, 126.81201949043754]
+        elif 'outdoor_day' in seq:
+            intrinsics=[223.9940010790056, 223.61783486959376, 170.7684322973841, 128.18711828338436]
+        elif 'indoor_flying' in seq:
+            intrinsics=[226.38018519795807, 226.15002947047415, 173.6470807871759, 133.73271487507847]
+        else:
+            raise ValueError('Unknown scenario: %s' % scenario)
+        fx, fy, cx, cy = intrinsics
         width = 346
         height = 260
 

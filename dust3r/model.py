@@ -19,12 +19,14 @@ from third_party.raft import load_RAFT
 import dust3r.utils.path_to_croco  # noqa: F401
 from models.croco import CroCoNet  # noqa
 from .event_model import create_model
-from .event_model.fusion import ImageEventFusion, check_shape_consistency
+from .event_model.fusion import ImageEventFusion, check_shape_consistency, CrossAttention
 from .event_model.lightup_net import EvLightEnhancer
 from .visualization import visualize_image_snr, visualize_feature
 
 import cv2
 import torch.nn.functional as F
+
+import math
 
 inf = float('inf')
 
@@ -118,22 +120,64 @@ class AsymmetricCroCo3DStereo (
     def _init_event_control(self, img_size, patch_size, enc_embed_dim, dec_embed_dim):
         """ Initialize modules for processing event voxel data and injecting it into the network. """
         # embedding
-        # self.event_embed = deepcopy(self.patch_embed)
-        # self.event_embed.proj = nn.Conv2d(self.event_in_channels, enc_embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.event_embed = deepcopy(self.patch_embed)
+        self.event_embed.proj = nn.Conv2d(self.event_in_channels, enc_embed_dim, kernel_size=patch_size, stride=patch_size)
         # # Zero-convolution layers
-        # self.enc_zero_conv_in = self.zero_module(nn.Conv1d(enc_embed_dim, enc_embed_dim, 1))
-        # self.enc_zero_conv_out = self.zero_module(nn.Conv1d(enc_embed_dim, enc_embed_dim, 1))
+        self.enc_zero_conv_in = self.zero_module(nn.Conv1d(enc_embed_dim, enc_embed_dim, 1))
+        self.enc_zero_conv_out = self.zero_module(nn.Conv1d(enc_embed_dim, enc_embed_dim, 1))
         # Trainable copy
-        # self.enc_blocks_trainable = nn.ModuleList([deepcopy(blk) for blk in self.enc_blocks])
-        self.enc_blocks_trainable = create_model()
+        self.enc_blocks_trainable = nn.ModuleList([deepcopy(blk) for blk in self.enc_blocks])
+        # self.enc_blocks_trainable = create_model()
         # event_channels = [96, 192, 384, 768]
         # self.fusion_module = nn.ModuleList(
         #     [ImageEventFusion(event_channels=event_channels[i], target_channels=1024) for i in range(4)]
         # )
 
-        # # Set all parameters of the SWINPad model to trainable
-        # for param in self.enc_blocks_trainable.parameters():
-        #     param.requires_grad = True
+        # Set all parameters of the SWINPad model to trainable
+        for param in self.enc_blocks_trainable.parameters():
+            param.requires_grad = True
+                # 如果启用交叉注意力
+        # 从croco_kwargs获取num_heads，但减少头数以节省显存
+        num_heads = 8
+        
+        # 只在部分层使用交叉注意力，每6层使用一次
+        attn_layers = list(range(0, len(self.enc_blocks), 6))
+        if len(self.enc_blocks) - 1 not in attn_layers:
+            attn_layers.append(len(self.enc_blocks) - 1)  # 确保最后一层有交叉注意力
+        
+        # 为event encoder添加稀疏的交叉注意力模块
+        self.event_cross_attns = nn.ModuleDict({
+            str(i): CrossAttention(
+                dim=enc_embed_dim,
+                num_heads=num_heads,  # 减少头数
+                qkv_bias=True,
+                attn_drop=0.1,
+                proj_drop=0.1,
+                rope=self.rope if hasattr(self, 'rope') else None
+            ) for i in attn_layers
+        })
+        
+        # 归一化层
+        self.event_norms = nn.ModuleDict({
+            str(i): nn.LayerNorm(enc_embed_dim) for i in attn_layers
+        })
+        
+        self.img_norms = nn.ModuleDict({
+            str(i): nn.LayerNorm(enc_embed_dim) for i in attn_layers
+        })
+        
+        # 交叉注意力权重 - 初始化为0，逐渐学习
+        self.cross_attn_weights = nn.ParameterDict({
+            str(i): nn.Parameter(torch.zeros(1)) for i in attn_layers
+        })
+        
+        # 初始化为小权重，确保训练初期不影响原有模型
+        for i in attn_layers:
+            for p in self.event_cross_attns[str(i)].parameters():
+                if p.dim() > 1:
+                    nn.init.xavier_uniform_(p, gain=0.01)
+                else:
+                    nn.init.zeros_(p)
         
         # Low-light enhancer initialization
         if self.use_lowlight_enhancer:
@@ -222,6 +266,12 @@ class AsymmetricCroCo3DStereo (
         #     c, _ = self.event_embed(event_voxel, true_shape=true_shape)
         #     c_in = self.enc_zero_conv_in(c.transpose(1, 2)).transpose(1, 2) + x  # [B, N, enc_embed_dim]
         #     patch_mask = self.masks_to_patch_masks(LL_mask) if LL_mask is not None else None
+        if self.use_event_control and event_voxel is not None:
+            # Event voxel shape: [B, 6, H, W]
+            c, c_pos = self.event_embed(event_voxel, true_shape=true_shape)
+            
+            # 保持原有的方式：通过zero convolution输入
+            c_in = self.enc_zero_conv_in(c.transpose(1, 2)).transpose(1, 2) + x  # [B, N, enc_embed_dim]
 
         # add positional embedding without cls token
         assert self.enc_pos_embed is None
@@ -230,21 +280,65 @@ class AsymmetricCroCo3DStereo (
         # Apply transformer encoder blocks with event control
         # visualize_feature(x, save_path=f"feature_visualization.png", true_shape=true_shape, dim=100)
 
-        image_features= {}
+        # 依次处理每个encoder层
         for i, blk in enumerate(self.enc_blocks):
+            # image encoder保持不变
             x = blk(x, posvis)
-            # visualize_feature(x, save_path=f"feature{i:02d}_visualization.png", true_shape=true_shape, dim=100)
-            # 24 blocks, each output shape is [2, 576, 1024]
-            if (i+1) % (len(self.enc_blocks)/4) == 0:
-                event_blk_idx = int((i+1) / (len(self.enc_blocks)/4)) - 1
-                image_features[event_blk_idx] = x
-                # x = self.fusion_module[event_blk_idx](x, f_event[event_blk_idx],true_shape,snr_map,event_blk_idx)
-        if self.use_event_control and event_voxel is not None:
-            x = self.enc_blocks_trainable(event_voxel,image_features, true_shape=true_shape, snr_map=snr_map)[-1]
-            # [2, 96, 72, 128]
-            # [2, 192, 36, 64
-            # [2, 384, 18, 32]
-            # [2, 768, 9, 16]
+            
+            if self.use_event_control and event_voxel is not None:
+                # 修改event encoder，添加交叉注意力机制
+                if str(i) in self.event_cross_attns:
+                    # 归一化特征
+                    c_norm = self.event_norms[str(i)](c_in)
+                    x_norm = self.img_norms[str(i)](x)
+                    
+                    # 计算注意力权重
+                    weight = torch.sigmoid(self.cross_attn_weights[str(i)])
+                    
+                    # 应用交叉注意力：event特征关注image特征
+                    cross_attn_output = self.event_cross_attns[str(i)](
+                        c_norm,    # 查询：event特征
+                        x_norm,    # 键：image特征  
+                        x_norm,    # 值：image特征
+                        c_pos,     # 查询位置
+                        posvis     # 键值位置
+                    )
+                    
+                    # 残差连接：将交叉注意力结果添加到event特征
+                    c_in = c_in + weight * cross_attn_output
+                    
+                    # 然后通过原来的event encoder block
+                    c_in = self.enc_blocks_trainable[i](c_in, posvis)
+                else:
+                    # 使用原有的event encoder处理
+                    c_in = self.enc_blocks_trainable[i](c_in, posvis)
+                
+                # 在最后一层，根据SNR mask来融合event特征和image特征
+                if i == len(self.enc_blocks) - 1:
+                    c_out = self.enc_zero_conv_out(c_in.transpose(1, 2)).transpose(1, 2)
+                    
+                    # 如果有SNR map，使用它来加权融合
+                    if snr_map is not None:
+                        scale = int(math.sqrt(true_shape[0][0].item()*true_shape[0][1].item()/x.shape[1]))
+                        upsample_layer = nn.Upsample(size=(true_shape[0][0].item() // scale, true_shape[0][1].item() // scale), mode='bilinear', align_corners=False)
+                        snr_map = upsample_layer(snr_map).view(B, 1, c_out.shape[1]).transpose(1, 2)  # [B, H*W, 1]
+                        
+                        # 归一化SNR值到[0,1]范围
+                        snr_weight = torch.sigmoid(snr_map)
+                        
+                        # 进行加权融合
+                        try:
+                            # SNR高的地方用image encoder结果，SNR低的地方用event encoder结果
+                            x = x * snr_weight + c_out * (1 - snr_weight)
+                        except RuntimeError as e:
+                            # 保持原有特征不变
+                            pass
+                    else:
+                        # 如果没有SNR map，使用原来的方式
+                        try:
+                            x = x + c_out
+                        except RuntimeError as e:
+                            pass
 
         x = self.enc_norm(x)
         return x, pos, None
