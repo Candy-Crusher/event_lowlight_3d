@@ -25,7 +25,7 @@ from .visualization import visualize_image_snr, visualize_feature
 
 import cv2
 import torch.nn.functional as F
-
+import math
 inf = float('inf')
 
 hf_version_number = huggingface_hub.__version__
@@ -134,7 +134,15 @@ class AsymmetricCroCo3DStereo (
         # # Set all parameters of the SWINPad model to trainable
         # for param in self.enc_blocks_trainable.parameters():
         #     param.requires_grad = True
-        
+
+        self.linear_adjust = nn.Linear(768, 1024)
+        self.sigmoid = nn.Sigmoid()
+        # 使用kaiming初始化，适合ReLU激活函数
+        nn.init.kaiming_normal_(self.linear_adjust.weight, mode='fan_out', nonlinearity='relu')
+        if self.linear_adjust.bias is not None:
+            # 偏置初始化为0
+            nn.init.zeros_(self.linear_adjust.bias)
+
         # Low-light enhancer initialization
         if self.use_lowlight_enhancer:
             print("Initializing EvLightEnhancer for low-light image enhancement")
@@ -240,12 +248,28 @@ class AsymmetricCroCo3DStereo (
                 image_features[event_blk_idx] = x
                 # x = self.fusion_module[event_blk_idx](x, f_event[event_blk_idx],true_shape,snr_map,event_blk_idx)
         if self.use_event_control and event_voxel is not None:
-            x = self.enc_blocks_trainable(event_voxel,image_features, true_shape=true_shape, snr_map=snr_map)[-1]
-            # [2, 96, 72, 128]
-            # [2, 192, 36, 64
-            # [2, 384, 18, 32]
-            # [2, 768, 9, 16]
+            event_feat = self.enc_blocks_trainable(event_voxel,image_features, true_shape=true_shape)[-1]
+            
+            scale = int(math.sqrt(true_shape[0][0].item()*true_shape[0][1].item()/x.shape[1]))
+            rescale_size = (true_shape[0][0].item() // scale, true_shape[0][1].item() // scale)
 
+            # 2. 分步处理以减少内存峰值
+            # 先调整空间维度
+            event_feat = F.interpolate(event_feat, size=rescale_size, mode='bilinear', align_corners=False)
+            # 重塑为序列形式
+            event_feat = event_feat.reshape(B, -1, N).transpose(1, 2)
+            # 调整通道数
+            event_feat = self.linear_adjust(event_feat)
+            
+            # 3. 处理SNR map
+            if snr_map is not None:
+                snr_map = F.interpolate(snr_map, size=rescale_size, mode='bilinear', align_corners=False)
+                snr_map = snr_map.reshape(B, 1, N).transpose(1, 2)
+                snr_weight = self.sigmoid(snr_map)
+                # 避免使用原地操作
+                x = x * snr_weight + event_feat * (1 - snr_weight)
+            else:
+                x = 0.5 * (x + event_feat)
         x = self.enc_norm(x)
         return x, pos, None
 

@@ -6,7 +6,7 @@ import numpy as np
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from functools import partial
 from .fusion import EventImageFusion
-
+import math
 class Mlp(nn.Module):
     """ Multilayer perceptron."""
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
@@ -323,14 +323,14 @@ class BasicLayer(nn.Module):
                 drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
                 norm_layer=norm_layer)
             for i in range(depth)])
-
+        self.fusion_module = EventImageFusion(event_channels=dim, target_channels=1024)
         # patch merging layer
         if downsample is not None:
             self.downsample = downsample(dim=dim, norm_layer=norm_layer)
         else:
             self.downsample = None
 
-    def forward(self, x, H, W):
+    def forward(self, x, H, W, f_img):
         """ Forward function.
 
         Args:
@@ -364,6 +364,17 @@ class BasicLayer(nn.Module):
                 x = checkpoint.checkpoint(blk, x, attn_mask)
             else:
                 x = blk(x, attn_mask)
+        # image feature shape B N C
+        # rescale image feature to match the spatial dimensions of out
+        # B, N, C = f_img.shape
+        # if N > H*W:
+        #     scale = int(math.sqrt(N/H/W))
+        #     f_img = f_img.transpose(1,2).view(B, -1, H*scale, W*scale)
+        # else:
+        #     scale = int(math.sqrt(H*W/N))
+        #     f_img = f_img.transpose(1,2).view(B, -1, H//scale, W//scale)
+        # f_img = F.interpolate(f_img, size=(H, W), mode='bilinear', align_corners=False).view(B, -1, H*W).transpose(1,2)
+        x = self.fusion_module(f_img, x)
         if self.downsample is not None:
             x_down = self.downsample(x, H, W)
             Wh, Ww = (H + 1) // 2, (W + 1) // 2
@@ -489,9 +500,6 @@ class SWINPad(nn.Module):
                 use_checkpoint=use_checkpoint)
             self.layers.append(layer)
 
-        self.fusion_module = nn.ModuleList(
-            [EventImageFusion(event_channels=int(embed_dim * 2 ** i_layer), target_channels=1024) for i_layer in range(self.num_layers)]
-        )
         num_features = [int(embed_dim * 2 ** i) for i in range(self.num_layers)]
         self.num_features = num_features
 
@@ -587,7 +595,7 @@ class SWINPad(nn.Module):
         else:
             raise TypeError('pretrained must be a str or None')
 
-    def forward(self, x, image_features, true_shape, snr_map):
+    def forward(self, x, image_features, true_shape):
         """Forward function."""
         x = self.patch_embed(x)
 
@@ -603,14 +611,14 @@ class SWINPad(nn.Module):
         outs = []
         for i in range(self.num_layers):
             layer = self.layers[i]
-            x_out, H, W, x, Wh, Ww = layer(x, Wh, Ww)
+            x_out, H, W, x, Wh, Ww = layer(x, Wh, Ww, image_features[i])
             if i in self.out_indices:
                 norm_layer = getattr(self, f'norm{i}')
                 x_out = norm_layer(x_out)
 
                 out = x_out.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
-                out = self.fusion_module[i](image_features[i], out, true_shape, snr_map, i)
                 outs.append(out)
+                # if event_blk_idx==3 and snr_map is not None:
         
         if self.num_classes !=0:
             x_out = x_out.mean(1)

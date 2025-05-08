@@ -83,7 +83,7 @@ class MVSEC(BaseStereoViewDataset):
                 print('seq', seq)
 
             rgb_path = os.path.join(seq, 'image_left_interpolated')
-            event_voxel_path = os.path.join(seq, 'event_left', 'event50_voxel_left')
+            event_voxel_path = os.path.join(seq, 'event_left', 'event_voxel_left')
             depth_path = os.path.join(seq, 'depth_left')
             caminfo_path = os.path.join(seq, 'odem_c2wpose_left.txt')
             caminfo = []
