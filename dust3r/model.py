@@ -117,31 +117,86 @@ class AsymmetricCroCo3DStereo (
 
     def _init_event_control(self, img_size, patch_size, enc_embed_dim, dec_embed_dim):
         """ Initialize modules for processing event voxel data and injecting it into the network. """
-        # embedding
-        # self.event_embed = deepcopy(self.patch_embed)
-        # self.event_embed.proj = nn.Conv2d(self.event_in_channels, enc_embed_dim, kernel_size=patch_size, stride=patch_size)
-        # # Zero-convolution layers
-        # self.enc_zero_conv_in = self.zero_module(nn.Conv1d(enc_embed_dim, enc_embed_dim, 1))
-        # self.enc_zero_conv_out = self.zero_module(nn.Conv1d(enc_embed_dim, enc_embed_dim, 1))
-        # Trainable copy
-        # self.enc_blocks_trainable = nn.ModuleList([deepcopy(blk) for blk in self.enc_blocks])
         self.enc_blocks_trainable = create_model()
-        # event_channels = [96, 192, 384, 768]
-        # self.fusion_module = nn.ModuleList(
-        #     [ImageEventFusion(event_channels=event_channels[i], target_channels=1024) for i in range(4)]
-        # )
-
-        # # Set all parameters of the SWINPad model to trainable
-        # for param in self.enc_blocks_trainable.parameters():
-        #     param.requires_grad = True
-
+        
+        # 特征调整层
         self.linear_adjust = nn.Linear(768, 1024)
         self.sigmoid = nn.Sigmoid()
-        # 使用kaiming初始化，适合ReLU激活函数
+        
+        # 空间特征调整模块
+        self.spatial_adjust = nn.Sequential(
+            nn.Conv2d(768, 768, kernel_size=3, padding=1),
+            nn.BatchNorm2d(768),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(768, 768, kernel_size=3, padding=1),
+            nn.BatchNorm2d(768),
+            nn.ReLU(inplace=True)
+        )
+        
+        # 通道注意力模块
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(768, 768 // 16, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(768 // 16, 768, 1),
+            nn.Sigmoid()
+        )
+        
+        # SNR map处理模块
+        self.snr_processor = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # 特征融合模块
+        self.fusion_attention = nn.Sequential(
+            nn.Linear(1024, 512),
+            nn.LayerNorm(512),
+            nn.ReLU(inplace=True),
+            nn.Linear(512, 1024),
+            nn.Sigmoid()
+        )
+        
+        # 特征归一化层
+        self.norm = nn.LayerNorm(1024)
+        
+        # 初始化权重
         nn.init.kaiming_normal_(self.linear_adjust.weight, mode='fan_out', nonlinearity='relu')
         if self.linear_adjust.bias is not None:
-            # 偏置初始化为0
             nn.init.zeros_(self.linear_adjust.bias)
+            
+        # 初始化空间调整模块
+        for m in self.spatial_adjust.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+                
+        # 初始化通道注意力模块
+        for m in self.channel_attention.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+                    
+        # 初始化SNR处理模块
+        for m in self.snr_processor.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
 
         # Low-light enhancer initialization
         if self.use_lowlight_enhancer:
@@ -248,29 +303,49 @@ class AsymmetricCroCo3DStereo (
                 image_features[event_blk_idx] = x
                 # x = self.fusion_module[event_blk_idx](x, f_event[event_blk_idx],true_shape,snr_map,event_blk_idx)
         if self.use_event_control and event_voxel is not None:
-            event_feat = self.enc_blocks_trainable(event_voxel,image_features, true_shape=true_shape)[-1]
+            # 1. 获取事件特征
+            event_feat = self.enc_blocks_trainable(event_voxel, image_features, true_shape=true_shape)[-1]
             
+            # 2. 计算目标尺寸
             scale = int(math.sqrt(true_shape[0][0].item()*true_shape[0][1].item()/x.shape[1]))
             rescale_size = (true_shape[0][0].item() // scale, true_shape[0][1].item() // scale)
 
-            # 2. 分步处理以减少内存峰值
-            # 先调整空间维度
-            # TODO: perhaps too simple?
+            # 3. 空间特征调整
+            event_feat = self.spatial_adjust(event_feat)
+            
+            # 4. 通道注意力
+            channel_weights = self.channel_attention(event_feat)
+            event_feat = event_feat * channel_weights
+            
+            # 5. 调整空间维度
             event_feat = F.interpolate(event_feat, size=rescale_size, mode='bilinear', align_corners=False)
-            # 重塑为序列形式
+            
+            # 6. 重塑为序列形式
             event_feat = event_feat.reshape(B, -1, N).transpose(1, 2)
-            # 调整通道数
+            
+            # 7. 调整通道数以匹配图像特征
             event_feat = self.linear_adjust(event_feat)
             
-            # 3. 处理SNR map
+            # 8. 特征归一化
+            x = self.norm(x)
+            event_feat = self.norm(event_feat)
+            
+            # 9. 计算注意力权重
+            attention_weights = self.fusion_attention(x)
+            
+            # 10. 处理SNR map并进行特征融合
             if snr_map is not None:
+                # 处理SNR map
                 snr_map = F.interpolate(snr_map, size=rescale_size, mode='bilinear', align_corners=False)
+                snr_map = self.snr_processor(snr_map)  # 使用SNR处理模块
                 snr_map = snr_map.reshape(B, 1, N).transpose(1, 2)
-                snr_weight = self.sigmoid(snr_map)
-                # 避免使用原地操作
-                x = x * snr_weight + event_feat * (1 - snr_weight)
+                
+                # 结合SNR权重和注意力权重进行融合
+                fusion_weight = snr_map * attention_weights
+                x = x * fusion_weight + event_feat * (1 - fusion_weight)
             else:
-                x = 0.5 * (x + event_feat)
+                # 如果没有SNR map，仅使用注意力权重
+                x = x * attention_weights + event_feat * (1 - attention_weights)
         x = self.enc_norm(x)
         return x, pos, None
 

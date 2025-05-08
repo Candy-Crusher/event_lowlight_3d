@@ -4,6 +4,7 @@ from torch.distributed import all_reduce, ReduceOp
 import math
 from ..visualization import visualize_tensors, visualize_tensors_snr
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
 def check_shape_consistency(tensor, name):
     # 获取张量形状并转换为张量
@@ -44,7 +45,7 @@ class CrossAttention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.rope = rope
         
-    def forward(self, query, key, value, query_pos=None, key_pos=None):
+    def forward(self, query, key, value, query_pos=None, key_pos=None, return_attention_weights=False):
         B, Nq, C = query.shape
         Nk = key.shape[1]
         
@@ -72,6 +73,11 @@ class CrossAttention(nn.Module):
         x = (attn @ v).transpose(1, 2).reshape(B, Nq, self.dim_embed)
         x = self.proj(x)
         x = self.proj_drop(x)
+        
+        if return_attention_weights:
+            # 返回注意力权重（平均所有头的注意力）
+            attn_weights = attn.mean(dim=1)  # [B, Nq, Nk]
+            return x, attn_weights
         return x
 
 class ImageEventFusion(nn.Module):
@@ -126,21 +132,52 @@ class ImageEventFusion(nn.Module):
 class EventImageFusion(nn.Module):
     def __init__(self, event_channels=768, target_channels=1024):
         super().__init__()
-        # self.attention = nn.MultiheadAttention(embed_dim=target_channels, num_heads=8)
-        self.attention = CrossAttention(dim_q=event_channels, dim_kv=target_channels, dim_embed=256, dim_out=event_channels)
+        # 多头注意力
+        self.attention = CrossAttention(
+            dim_q=event_channels, 
+            dim_kv=target_channels, 
+            dim_embed=256, 
+            dim_out=event_channels,
+            num_heads=8  # 添加多头
+        )
+        
+        # 特征归一化层
         self.norm = nn.LayerNorm(event_channels)
-        self.image_norm = nn.LayerNorm(target_channels)  # 新增：用于归一化图像特征
-        self.sigmoid = nn.Sigmoid()
-    
+        self.image_norm = nn.LayerNorm(target_channels)
+        
+        # 特征增强模块
+        self.feature_enhance = nn.Sequential(
+            nn.Linear(event_channels, event_channels * 2),
+            nn.ReLU(inplace=True),
+            nn.Linear(event_channels * 2, event_channels),
+            nn.LayerNorm(event_channels)
+        )
+        
+        # 注意力权重可视化
+        self.attention_weights = None
+        
+        # 初始化权重
         self._init_weights()
 
     def _init_weights(self):
-        # 初始化注意力模块
-        # 使用kaiming初始化，更适合注意力机制
-        nn.init.kaiming_normal_(self.attention.q_proj.weight, mode='fan_in', nonlinearity='linear')
-        nn.init.kaiming_normal_(self.attention.k_proj.weight, mode='fan_in', nonlinearity='linear')
-        nn.init.kaiming_normal_(self.attention.v_proj.weight, mode='fan_in', nonlinearity='linear')
-        nn.init.kaiming_normal_(self.attention.proj.weight, mode='fan_out', nonlinearity='linear')
+        def _init_module(module):
+            if isinstance(module, nn.Linear):
+                # 使用xavier初始化，更适合注意力机制
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+        
+        # 初始化所有模块
+        self.apply(_init_module)
+        
+        # 特别初始化注意力模块
+        nn.init.xavier_uniform_(self.attention.q_proj.weight)
+        nn.init.xavier_uniform_(self.attention.k_proj.weight)
+        nn.init.xavier_uniform_(self.attention.v_proj.weight)
+        nn.init.xavier_uniform_(self.attention.proj.weight)
         
         # 初始化注意力模块的偏置
         if self.attention.q_proj.bias is not None:
@@ -152,51 +189,53 @@ class EventImageFusion(nn.Module):
         if self.attention.proj.bias is not None:
             nn.init.zeros_(self.attention.proj.bias)
 
-        # 初始化LayerNorm
-        # 使用较小的初始值来避免训练初期的不稳定性
-        nn.init.constant_(self.norm.weight, 1.0)
-        nn.init.constant_(self.norm.bias, 0.0)
-        nn.init.constant_(self.image_norm.weight, 1.0)
-        nn.init.constant_(self.image_norm.bias, 0.0)
-
-        # 可选：添加一个小的扰动来打破对称性
-        with torch.no_grad():
-            self.norm.weight.add_(torch.randn_like(self.norm.weight) * 0.01)
-            self.image_norm.weight.add_(torch.randn_like(self.image_norm.weight) * 0.01)
-
     def forward(self, x, event_feat):
-        # 首先对图像特征进行归一化
-        x = self.image_norm(x)  # 新增：归一化图像特征
-        # TODO: lack enevt feature norm
-
-        old_x = x.clone()
-        old_event_feat = event_feat.clone()
-
-        # if event_blk_idx==3 and snr_map is not None:
-        #     snr_map = upsample_layer(snr_map).view(B, 1, H * W).transpose(1, 2)  # [B, H*W, 1]
-        #     snr_weight = self.sigmoid(snr_map)
-        #     output = x * snr_weight + event_feat * (1 - snr_weight)
-        #     # visualize_tensors_snr(old_x, old_event_feat, snr_map, output, save_path=f"visualization/tensor{event_blk_idx}_visualization.png",true_shape=true_shape)
-        #     return output
-
-        # x = x + event_feat
-
-        # Cross-Attention
-        # x 作为 query，event_feat 作为 key 和 value
-        # 为了 MultiheadAttention，调整维度为 [seq_len, batch, embed_dim]
-        # x = x.transpose(0, 1)  # [576, 2, 1024]
-        # event_feat = event_feat.transpose(0, 1)  # [576, 2, 1024]
-
+        # 特征归一化
+        x = self.image_norm(x)
+        event_feat = self.norm(event_feat)
+        
+        # 保存原始特征用于残差连接
+        residual = event_feat
+        
         # 计算注意力
-        # attn_output, _ = self.attention(query=event_feat, key=x, value=x)
-        attn_output = self.attention(query=event_feat, key=x, value=x)
-
-        # 恢复维度
-        # attn_output = attn_output.transpose(0, 1)  # [2, 576, 1024]
-
-        # 残差连接并归一化
-        # event_feat = self.norm(event_feat.transpose(0, 1) + attn_output)  # [2, 576, 1024]
-        event_feat = self.norm(event_feat+ attn_output)  # [2, 576, 1024]
-
-        # visualize_tensors(old_x, old_event_feat, attn_output, event_feat, save_path=f"visualization/tensor{event_blk_idx}_visualization.png",true_shape=true_shape)
-        return event_feat
+        attn_output, self.attention_weights = self.attention(
+            query=event_feat, 
+            key=x, 
+            value=x,
+            return_attention_weights=True
+        )
+        
+        # 特征增强
+        enhanced_feat = self.feature_enhance(attn_output)
+        
+        # 残差连接
+        output = residual + enhanced_feat
+        
+        # 最终归一化
+        output = self.norm(output)
+        
+        # 训练时进行梯度裁剪
+        if self.training:
+            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+        
+        return output
+    
+    def visualize_attention(self, save_path=None):
+        """可视化注意力权重"""
+        if self.attention_weights is not None and save_path is not None:
+            plt.figure(figsize=(10, 10))
+            plt.imshow(self.attention_weights.detach().cpu().numpy())
+            plt.colorbar()
+            plt.savefig(save_path)
+            plt.close()
+    
+    def get_feature_stats(self, x, event_feat):
+        """获取特征统计信息"""
+        stats = {
+            'x_mean': x.mean().item(),
+            'x_std': x.std().item(),
+            'event_feat_mean': event_feat.mean().item(),
+            'event_feat_std': event_feat.std().item(),
+            'attention_weights_mean': self.attention_weights.mean().item() if self.attention_weights is not None else 0
+        }
+        return stats
