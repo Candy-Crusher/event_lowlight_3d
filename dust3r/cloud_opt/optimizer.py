@@ -943,6 +943,7 @@ class PointCloudOptimizer(BasePCOptimizer):
 
                 # Compute "ego-motion flow" by projecting using DepthBasedWarping
                 # Note that DepthBasedWarping expects batch dimension, so add unsqueeze(0)
+                # TODO: 需要修改 event loss
                 ego_flow_1_2, _ = self.depth_wrapper(R1, T1, R2, T2, disp_1, K2, inv_K1)
                 ego_flow_2_1, _ = self.depth_wrapper(R2, T2, R1, T1, disp_2, K1, inv_K2)
 
