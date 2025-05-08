@@ -243,7 +243,7 @@ class AsymmetricCroCo3DStereo (
             x = blk(x, posvis)
             # visualize_feature(x, save_path=f"feature{i:02d}_visualization.png", true_shape=true_shape, dim=100)
             # 24 blocks, each output shape is [2, 576, 1024]
-            if (i+1) % (len(self.enc_blocks)/4) == 0:
+            if (i+1) % (len(self.enc_blocks)/4) == 0:   # 5, 11, 17, 23 layers in monst3r encoder
                 event_blk_idx = int((i+1) / (len(self.enc_blocks)/4)) - 1
                 image_features[event_blk_idx] = x
                 # x = self.fusion_module[event_blk_idx](x, f_event[event_blk_idx],true_shape,snr_map,event_blk_idx)
@@ -255,6 +255,7 @@ class AsymmetricCroCo3DStereo (
 
             # 2. 分步处理以减少内存峰值
             # 先调整空间维度
+            # TODO: perhaps too simple?
             event_feat = F.interpolate(event_feat, size=rescale_size, mode='bilinear', align_corners=False)
             # 重塑为序列形式
             event_feat = event_feat.reshape(B, -1, N).transpose(1, 2)

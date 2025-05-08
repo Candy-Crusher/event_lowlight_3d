@@ -167,6 +167,7 @@ class EventImageFusion(nn.Module):
     def forward(self, x, event_feat):
         # 首先对图像特征进行归一化
         x = self.image_norm(x)  # 新增：归一化图像特征
+        # TODO: lack enevt feature norm
 
         old_x = x.clone()
         old_event_feat = event_feat.clone()
