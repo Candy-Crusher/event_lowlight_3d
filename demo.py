@@ -57,6 +57,12 @@ def get_args_parser():
     parser.add_argument('--fps', type=int, default=0, help='FPS for video processing')
     parser.add_argument('--num_frames', type=int, default=200, help='Maximum number of frames for video processing')
     
+    # Event loss parameters
+    parser.add_argument('--event_loss_weight', type=float, default=0.0, help='Event loss weight for pose optimization')
+    parser.add_argument('--event_loss_start_epoch', type=float, default=0.1, help='Start epoch for event loss')
+    parser.add_argument('--event_loss_thre', type=float, default=20, help='Threshold for event loss')
+    parser.add_argument('--event_threshold', type=float, default=0.1, help='Threshold for event generation')
+    
     # Add "share" argument if you want to make the demo accessible on the public internet
     parser.add_argument("--share", action='store_true', default=False, help="Share the demo")
     return parser
@@ -133,7 +139,9 @@ def get_reconstructed_scene(args, outdir, model, device, silent, image_size, fil
                                flow_loss_weight=flow_loss_weight, flow_loss_start_epoch=flow_loss_start_iter, flow_loss_thre=flow_loss_threshold, use_self_mask=not use_gt_mask,
                                num_total_iter=niter, empty_cache= len(filelist) > 72, batchify=not (args.not_batchify or args.window_wise),
                                window_wise=args.window_wise, window_size=args.window_size, window_overlap_ratio=args.window_overlap_ratio,
-                               prev_video_results=prev_video_results)
+                               prev_video_results=prev_video_results,
+                               event_loss_weight=args.event_loss_weight, event_loss_start_epoch=args.event_loss_start_epoch,
+                               event_loss_thre=args.event_loss_thre, event_threshold=args.event_threshold)
     else:
         mode = GlobalAlignerMode.PairViewer
         scene = global_aligner(output, device=device, mode=mode, verbose=not silent)
@@ -328,6 +336,12 @@ def main_demo(tmpdirname, model, device, image_size, server_name, server_port, s
                 # for video processing
                 fps = gradio.Slider(label="FPS", value=0, minimum=0, maximum=60, step=1)
                 num_frames = gradio.Slider(label="Num Frames", value=100, minimum=0, maximum=200, step=1)
+                
+            with gradio.Row():
+                event_loss_weight = gradio.Slider(label="Event Loss Weight", value=0.01, minimum=0.0, maximum=1.0, step=0.001)
+                event_loss_start_iter = gradio.Slider(label="Event Loss Start Iter", value=0.1, minimum=0, maximum=1, step=0.01)
+                event_loss_threshold = gradio.Slider(label="Event Loss Threshold", value=25, minimum=0, maximum=100, step=1)
+                event_threshold = gradio.Slider(label="Event Threshold", value=0.1, minimum=0.01, maximum=1.0, step=0.01)
 
             outmodel = gradio.Model3D()
             outgallery = gradio.Gallery(label='rgb,depth,confidence, init_conf', columns=4, height="100%")
@@ -345,7 +359,8 @@ def main_demo(tmpdirname, model, device, image_size, server_name, server_port, s
                                   scenegraph_type, winsize, refid, seq_name, new_model_weights, 
                                   temporal_smoothing_weight, translation_weight, shared_focal, 
                                   flow_loss_weight, flow_loss_start_iter, flow_loss_threshold, use_davis_gt_mask,
-                                  fps, num_frames],
+                                  fps, num_frames, 
+                                  event_loss_weight, event_loss_start_iter, event_loss_threshold, event_threshold],
                           outputs=[scene, outmodel, outgallery])
             min_conf_thr.release(fn=model_from_scene_fun,
                                  inputs=[scene, min_conf_thr, as_pointcloud, mask_sky,
@@ -446,6 +461,10 @@ if __name__ == '__main__':
                 use_gt_mask=args.use_gt_davis_masks,
                 fps=args.fps,
                 num_frames=args.num_frames,
+                event_loss_weight=args.event_loss_weight,
+                event_loss_start_iter=args.event_loss_start_epoch,
+                event_loss_threshold=args.event_loss_thre,
+                event_threshold=args.event_threshold,
             )
         print(f"Processing completed. Output saved in {tmpdirname}/{args.seq_name}")
     else:

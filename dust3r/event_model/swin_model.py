@@ -540,8 +540,18 @@ class SWINPad(nn.Module):
                             relative_position_bias_table_pretrained.permute(1, 0).view(1, nH1, S1, S1), size=(S2, S2),
                             mode='bicubic')
                         state_dict[k] = relative_position_bias_table_pretrained_resized.view(nH2, L2).permute(1, 0)
-            missing = self.load_state_dict(state_dict,strict=False)
-            print(missing)
+            
+            # 在加载权重之前，判断是否是评估模式
+            import os
+            # 检查是否存在EVAL_MODE环境变量或其他评估标志
+            is_eval_mode = os.environ.get('EVAL_MODE', '0') == '1'
+            
+            missing = self.load_state_dict(state_dict, strict=False)
+            
+            if is_eval_mode:
+                print("Running in evaluation mode, missing keys will be initialized with default values")
+            else:
+                print(missing)
             
         if num_classes != 0:
             self.head = nn.Linear(num_features[-1], num_classes)

@@ -184,6 +184,7 @@ class TarTanAirDUSt3R(BaseStereoViewDataset):
             # rgb_image = imread_cv2(impath)
             rgb_image = imreadlowlight_cv2(impath, brightness_factor=0.5, gamma=1.5, noise_std=0.05, as_uint8=True, lightup="clahe")
             event_voxel = read_voxel_hdf5(eventpath)    # 6 H W
+            event_voxel = event_voxel[:-1]  # 丢弃第一个维度的最后一个，从6变为5
             depthmap = depth_read(depthpath)
 
             rgb_image, depthmap, intrinsics, event_voxel = self._crop_resize_if_necessary(

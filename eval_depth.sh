@@ -8,18 +8,20 @@ root_dir="/mnt/sdc/xswu/3d/code/results"
 # experiment_name="MonST3R_PO-TA-S-W_ViTLarge_BaseDecoder_512_dpt_mvsec_rect_wE_singlefusion"
 # experiment_name="MonST3R_PO-TA-S-W_ViTLarge_BaseDecoder_512_dpt_mvsec_rect_wE_singlefusionatt"
 # experiment_name="MonST3R_PO-TA-S-W_ViTLarge_BaseDecoder_512_dpt_mvsec_rect_woE"
-# experiment_name="MonST3R_PO-TA-S-baseline_rect_inpainted"
+experiment_name="ours_finetune_wE_cat"
 # experiment_name="MonST3R_PO-TA-S-baseline_rect_interpolated"
-experiment_name="MonST3R_PO-TA-S-W_ViTLarge_BaseDecoder_512_dpt_mvsec_rect_wE_SNRmultiatt_eventbranch"
+# experiment_name="enhancement_snr_raw_mvsec_freezeencoder"
     # --pretrained="checkpoints/MonST3R_PO-TA-S-W_ViTLarge_BaseDecoder_512_dpt.pth"   \
 CUDA_VISIBLE_DEVICES=4 torchrun --nproc_per_node=1 --master_port=29606 launch.py --mode=eval_depth  \
     --pretrained="$root_dir/$experiment_name/checkpoint-best.pth"   \
     --eval_dataset=mvsec \
     --seq_list="outdoor_night/outdoor_night1" \
-    --output_dir="/mnt/sdc/xswu/3d/code/results/$experiment_name" \
+    --output_dir="/mnt/sdc/yifei/code/3d/results/$experiment_name" \
     --use_event_control \
     --use_lowlight_enhancer \
     --event_enhance_mode="easy" \
+    # --save_enhancement_info \
+    # --use_cross_attention_for_event \
     # To use the ground truth dynamic mask for davis, add: --use_gt_mask
     # --pretrained="/mnt/sdc/xswu/3d/code/results/$experiment_name/checkpoint-best.pth"   \
     # --eval_dataset=mvsec --output_dir="/mnt/sdc/xswu/3d/code/results/$experiment_name" 

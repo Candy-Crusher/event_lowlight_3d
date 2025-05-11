@@ -11,6 +11,7 @@ import torch.nn as nn
 from dust3r.inference import get_pred_pts3d, find_opt_scaling
 from dust3r.utils.geometry import inv, geotrf, normalize_pointcloud
 from dust3r.utils.geometry import get_joint_pointcloud_depth, get_joint_pointcloud_center_scale
+from .event_model.enhancement_loss import ZeroDCELoss
 
 
 def Sum(*losses_and_masks):
@@ -297,3 +298,85 @@ class Regr3D_ScaleInv (Regr3D):
 class Regr3D_ScaleShiftInv (Regr3D_ScaleInv, Regr3D_ShiftInv):
     # calls Regr3D_ShiftInv first, then Regr3D_ScaleInv
     pass
+
+
+class CombinedLoss(MultiLoss):
+    """
+    组合损失函数，包括3D点云重建损失和图像增强损失，基于Zero-DCE论文
+    """
+    def __init__(self, reconstruction_loss, enhancement_loss_weight=0.5, 
+                 w_exp=1.0, w_col=0.5, w_tvI=20.0, w_spa=1.0, w_tvR=0.01):
+        """
+        参数:
+            reconstruction_loss: 3D点云重建损失函数
+            enhancement_loss_weight: 图像增强损失的权重
+            w_exp: 曝光控制损失的权重 (exposure control loss)
+            w_col: 颜色恒常性损失的权重 (color constancy loss)
+            w_tvI: 照明平滑损失的权重 (illumination smoothness loss)
+            w_spa: 空间一致性损失的权重 (spatial consistency loss)
+            w_tvR: 反射率平滑损失的权重 (reflectance smoothness loss)
+        """
+        super().__init__()
+        self.reconstruction_loss = reconstruction_loss
+        self.enhancement_loss_weight = enhancement_loss_weight
+        
+        # 使用Zero-DCE损失模型
+        if enhancement_loss_weight > 0:
+            self.enhancement_loss = ZeroDCELoss(
+                w_exp=w_exp,
+                w_col=w_col,
+                w_tvI=w_tvI,
+                w_spa=w_spa,
+                w_tvR=w_tvR,
+                spa_patch_size=4,
+                exp_patch_size=16,
+                exp_well_exposed_level=0.6,
+                tv_l2=True
+            )
+        else:
+            self.enhancement_loss = None
+    
+    def get_name(self):
+        return f'CombinedLoss({self.reconstruction_loss}, enh_w={self.enhancement_loss_weight})'
+    
+    def compute_loss(self, gt1, gt2, pred1, pred2, **kw):
+        # 计算3D重建损失
+        recon_loss, recon_details = self.reconstruction_loss(gt1, gt2, pred1, pred2, **kw)
+        
+        total_loss = recon_loss
+        details = recon_details
+        
+        # 如果需要计算增强损失
+        if self.enhancement_loss_weight > 0 and self.enhancement_loss is not None and pred1.get('use_enhancement_loss', False):
+            original_image = pred1.get('original_image')
+            enhanced_image = pred1.get('enhanced_image')
+            
+            if original_image is not None and enhanced_image is not None:
+                # 获取照明图、反射率图和其他相关数据
+                illumination_map = pred1.get('illumination_map')
+                reflectance_map = pred1.get('reflectance_map')
+                snr_map = pred1.get('snr_map')
+                event_voxel = gt1.get('event_voxel')
+                
+                # 使用Zero-DCE损失函数计算增强损失
+                enh_loss, enh_details = self.enhancement_loss(
+                    enhanced_image=enhanced_image, 
+                    original_image=original_image,
+                    event_voxel=event_voxel,
+                    snr_map=snr_map,
+                    illumination_map=illumination_map,
+                    reflectance_map=reflectance_map
+                )
+                
+                # 应用权重
+                weighted_enh_loss = enh_loss * self.enhancement_loss_weight
+                
+                # 添加到总损失
+                total_loss = total_loss + weighted_enh_loss
+                
+                # 更新详情字典
+                details['enhancement_total_weighted'] = weighted_enh_loss.item()
+                for k, v in enh_details.items():
+                    details[k] = v
+        
+        return total_loss, details

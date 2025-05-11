@@ -309,6 +309,7 @@ class Decoder(nn.Module):
         
         return enhanced_residual, snr_map
 
+# old version
 class EasyIlluminationNet(nn.Module):
     def __init__(self, image_channels=3, event_channels=None):  # event_channels不再使用，保留为了接口兼容
         super(EasyIlluminationNet, self).__init__()
@@ -376,10 +377,121 @@ class EasyIlluminationNet(nn.Module):
         enhanced_image = low_light_image * illumination_map
         
         # 4. 生成SNR图
-        snr_map = self._generate_snr_map(enhanced_image)
+        # snr_map = self._generate_snr_map(enhanced_image)
+        # 通过input image生成SNR图
+        snr_map = self._generate_snr_map(low_light_image)
         
-        return enhanced_image, snr_map
+        return enhanced_image, snr_map, illumination_map, illumination_prior
 
+# update version to make it more like retinex implementation and modify the snr map calculation, to lay more emphasis on the low light region
+# class EasyIlluminationNet(nn.Module):
+#     def __init__(self, image_channels=3, event_channels=None):  # event_channels保留为接口兼容
+#         super(EasyIlluminationNet, self).__init__()
+        
+#         # 照明特征提取器
+#         self.ill_extractor = nn.Sequential(
+#             nn.Conv2d(
+#                 image_channels + 1,  # 图像 + 初始照明图
+#                 32,
+#                 kernel_size=3,
+#                 stride=1,
+#                 padding=1,
+#             ),
+#             nn.LeakyReLU(negative_slope=0.01, inplace=True),
+#             nn.Conv2d(
+#                 32,
+#                 16,
+#                 kernel_size=3,
+#                 stride=1,
+#                 padding=1,
+#             ),
+#             nn.LeakyReLU(negative_slope=0.01, inplace=True),
+#         )
+        
+#         # 照明映射 - 减少到单通道
+#         self.reduce = nn.Sequential(
+#             nn.Conv2d(16, 1, 1, 1, 0),
+#             nn.Sigmoid()  # 确保照明图范围在[0,1]
+#         )
+        
+#         # 照明增强网络 - 用于增强照明图
+#         self.enhance_net = nn.Sequential(
+#             nn.Conv2d(1, 8, kernel_size=3, padding=1),
+#             nn.LeakyReLU(negative_slope=0.01, inplace=True),
+#             nn.Conv2d(8, 8, kernel_size=3, padding=1),
+#             nn.LeakyReLU(negative_slope=0.01, inplace=True),
+#             nn.Conv2d(8, 1, kernel_size=1),
+#             nn.Sigmoid()  # 确保增强后的照明图范围在[0,1]
+#         )
+        
+#     def _generate_illumination_prior(self, img):
+#         """生成照明先验图"""
+#         return torch.max(img, dim=1, keepdim=True)[0]
+        
+#     def _generate_snr_map(self, original_img, enhanced_img):
+#         """改进的SNR图计算 - 考虑原始图像和增强后图像"""
+#         # 转换为灰度图
+#         def rgb_to_gray(image):
+#             r, g, b = image[:, 0:1], image[:, 1:2], image[:, 2:3]
+#             return 0.299 * r + 0.587 * g + 0.114 * b
+            
+#         # 计算原始和增强图像的灰度版本
+#         gray_orig = rgb_to_gray(original_img)
+#         gray_enhanced = rgb_to_gray(enhanced_img)
+        
+#         # 使用高斯滤波进行平滑处理，更接近论文中的处理方式
+#         kernel_size = 5
+#         padding = kernel_size // 2
+#         sigma = 1.5
+        
+#         # 模拟高斯滤波
+#         denoised_enhanced = F.avg_pool2d(
+#             F.pad(gray_enhanced, (padding, padding, padding, padding), mode='reflect'),
+#             kernel_size=kernel_size, 
+#             stride=1
+#         )
+        
+#         # 计算局部对比度
+#         epsilon = 1e-6  # 避免除零
+        
+#         # 结合原始亮度信息的SNR估计
+#         # 在亮度低的区域，原始信噪比低；在亮度增强后的区域，信噪比提高
+#         brightness_factor = torch.clamp(gray_enhanced / (gray_orig + epsilon), min=0.5, max=5.0)
+        
+#         # 最终SNR图：考虑原始亮度和增强后的细节保留
+#         snr_map = denoised_enhanced / (torch.abs(gray_enhanced - denoised_enhanced) + epsilon)
+#         snr_map = snr_map * brightness_factor
+        
+#         return snr_map
+    
+#     def forward(self, low_light_image, event_voxel=None):  # event_voxel参数保留但不使用
+#         # 步骤1: 生成照明先验图
+#         illumination_prior = self._generate_illumination_prior(low_light_image)
+        
+#         # 步骤2: 提取照明特征并预测照明图
+#         pred_illu_feature = self.ill_extractor(torch.cat((low_light_image, illumination_prior), dim=1))
+#         illumination_map = self.reduce(pred_illu_feature)
+        
+#         # 步骤3: 根据Retinex理论分解图像
+#         epsilon = 1e-6  # 避免除零
+#         # 分解为反射率和照明度
+#         reflectance = low_light_image / (illumination_map + epsilon)
+        
+#         # 步骤4: 增强照明图
+#         enhanced_illumination = self.enhance_net(illumination_map)
+        
+#         # 步骤5: 重建增强图像 - 按照Retinex公式：S' = R ◦ I'
+#         enhanced_image = reflectance * enhanced_illumination
+        
+#         # 限制在有效范围内
+#         enhanced_image = torch.clamp(enhanced_image, 0, 1)
+        
+#         # 步骤6: 生成改进的SNR图
+#         snr_map = self._generate_snr_map(low_light_image, enhanced_image)
+        
+#         # 返回增强后的图像、SNR图、照明图和反射率图
+#         return enhanced_image, snr_map, enhanced_illumination, reflectance
+    
 # 事件引导的低光图像增强网络
 class ComplexEvLightEnhancer(nn.Module):
     def __init__(self, image_channels=3, event_channels=5, base_channels=16, snr_thresholds=[0.5, 0.5, 0.5], use_checkpoint=True):
@@ -468,23 +580,27 @@ class EvLightEnhancer(nn.Module):
 
         Args:
             low_light_image: 低光图像 [B, C, H, W]
-            event_voxel: 事件体素数据 [B, C, H, W]，对于'none'和'easy'模式会被忽略
+            event_voxel: 事件体素 [B, C_e, H, W]，在easy模式下不使用
 
         Returns:
             enhanced_image: 增强后的图像 [B, C, H, W]
-            snr_map: 信噪比图 [B, 1, H, W]
+            snr_map: SNR图 [B, 1, H, W]
+            illumination_map: 照明图 [B, 1, H, W]，仅在easy模式下返回
+            reflectance_map: 反射率图 [B, C, H, W]，仅在easy模式下返回
         """
         if self.mode == 'none':
-            batch_size, _, height, width = low_light_image.shape
-            return low_light_image, torch.zeros((batch_size, 1, height, width), device=low_light_image.device)
-
-        if self.mode == 'easy':
-            # 使用改进后的easy增强网络，不使用event数据
-            enhanced_image, snr_map = self.illumination_net(low_light_image)
-            return enhanced_image, snr_map
-
-        # complex模式
-        return self.enhancer(low_light_image, event_voxel)
+            # 不进行增强，直接返回原图和全1的SNR图
+            dummy_snr = torch.ones_like(low_light_image[:, 0:1, :, :])
+            return low_light_image, dummy_snr, None, None
+        
+        elif self.mode == 'easy':
+            # 使用轻量级增强，返回增强后的图像、SNR图、照明图和反射率图
+            return self.illumination_net(low_light_image, event_voxel)
+        
+        elif self.mode == 'complex':
+            # 使用复杂的增强网络，但不返回照明图和反射率图
+            enhanced_image, snr_map = self.enhancer(low_light_image, event_voxel)
+            return enhanced_image, snr_map, None, None
 
 # 测试代码
 if __name__ == '__main__':

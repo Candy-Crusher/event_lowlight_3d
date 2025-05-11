@@ -126,6 +126,8 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
                         flow_loss_start_epoch=args.flow_loss_start_epoch, flow_loss_thre=args.flow_loss_thre, translation_weight=args.translation_weight,
                         sintel_ckpt=args.eval_dataset == 'sintel', use_self_mask=not args.use_gt_mask, sam2_mask_refine=args.sam2_mask_refine,
                         empty_cache=len(imgs) >= 40 and len(pairs) > 300, pxl_thre=args.pxl_thresh, # empty cache to make it run on 48GB GPU
+                        event_loss_weight=args.event_loss_weight, event_loss_start_epoch=args.event_loss_start_epoch, 
+                        event_loss_thre=args.event_loss_thre, event_threshold=args.event_threshold
                     )
                     if args.use_gt_focal:
                         focal_path = os.path.join(

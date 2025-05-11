@@ -43,8 +43,8 @@ def get_args_parser():
     parser.add_argument('--model', default="AsymmetricCroCo3DStereo(pos_embed='RoPE100', patch_embed_cls='ManyAR_PatchEmbed', \
                         img_size=(512, 512), head_type='dpt', output_mode='pts3d', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), \
                         enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12, freeze='encoder', \
-                        use_event_control=${use_event_control},use_lowlight_enhancer=${use_lowlight_enhancer}, event_enhance_mode='${event_enhance_mode}', \
-                        use_cross_attention_for_event=${use_cross_attention_for_event})", \
+                        use_event_control=${use_event_control},use_lowlight_enhancer=${use_lowlight_enhancer}, event_enhance_mode=${event_enhance_mode}, \
+                        use_cross_attention_for_event=${use_cross_attention_for_event}, save_enhancement_info=${save_enhancement_info})", \
                         type=str, help="string containing the model to build")
     parser.add_argument('--pretrained', default=None, help='path of a starting checkpoint')
     parser.add_argument('--train_criterion', default="ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)",
@@ -130,27 +130,44 @@ def get_args_parser():
 
     # output dir
     parser.add_argument('--output_dir', default='./results/tmp', type=str, help="path where to save the output")
+
+    # Event loss相关参数
+    parser.add_argument('--event_loss_weight', default=0.0, type=float, help='event loss weight for pose optimization')
+    parser.add_argument('--event_loss_start_epoch', default=0.1, type=float, help='start epoch for event loss')
+    parser.add_argument('--event_loss_thre', default=20, type=float, help='threshold for event loss')
+    parser.add_argument('--event_threshold', default=0.1, type=float, help='threshold for event generation')
+    
+    # Enhancement相关参数
+    parser.add_argument('--save_enhancement_info', action='store_true', help='Whether to save enhancement information for loss calculation')
+
     return parser
 
 def load_model(args, device):
     # model
     use_event_control_value = str(args.use_event_control)
     use_lowlight_enhancer_value = str(args.use_lowlight_enhancer)
-    event_enhance_mode_value = str(args.event_enhance_mode)
+    event_enhance_mode_value = f"'{args.event_enhance_mode}'"
     use_cross_attention_for_event_value = str(args.use_cross_attention_for_event)
+    save_enhancement_info_value = str(args.save_enhancement_info)
+    
     model_config = args.model.replace('${use_event_control}', use_event_control_value)  
     model_config = model_config.replace('${use_lowlight_enhancer}', use_lowlight_enhancer_value)
     model_config = model_config.replace('${event_enhance_mode}', event_enhance_mode_value)
     model_config = model_config.replace('${use_cross_attention_for_event}', use_cross_attention_for_event_value)
+    model_config = model_config.replace('${save_enhancement_info}', save_enhancement_info_value)
+    
     print('Loading model: {:s}'.format(model_config))
     model = eval(model_config)
+    
     model.to(device)
     model_without_ddp = model
+    
     if args.pretrained and not args.resume:
         print('Loading pretrained: ', args.pretrained)
         ckpt = torch.load(args.pretrained, map_location=device)
         print(model.load_state_dict(ckpt['model'], strict=False))
         del ckpt  # in case it occupies memory
+    
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[args.gpu], find_unused_parameters=True, static_graph=True)

@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 import contextlib
+import os
 
 from dust3r.cloud_opt.base_opt import BasePCOptimizer, edge_str
 from dust3r.cloud_opt.pair_viewer import PairViewer
@@ -12,6 +13,7 @@ from dust3r.utils.device import to_cpu, to_numpy
 from dust3r.utils.goem_opt import DepthBasedWarping, OccMask, WarpImage, depth_regularization_si_weighted, tum_to_pose_matrix
 from third_party.raft import load_RAFT
 from sam2.build_sam import build_sam2_video_predictor
+from dust3r.cloud_opt.event_loss import compute_event_loss as intensity_based_event_loss
 sam2_checkpoint = "third_party/sam2/checkpoints/sam2.1_hiera_large.pt"
 model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
@@ -36,7 +38,8 @@ class PointCloudOptimizer(BasePCOptimizer):
     def __init__(self, *args, optimize_pp=False, focal_break=20, shared_focal=False, flow_loss_fn='smooth_l1', flow_loss_weight=0.0, 
                  depth_regularize_weight=0.0, num_total_iter=300, temporal_smoothing_weight=0, translation_weight=0.1, flow_loss_start_epoch=0.15, flow_loss_thre=50,
                  sintel_ckpt=False, use_self_mask=False, pxl_thre=50, sam2_mask_refine=True, motion_mask_thre=0.35, batchify=False,
-                 window_wise=False, window_size=100, window_overlap_ratio=0.5, prev_video_results=None, **kwargs):
+                 window_wise=False, window_size=100, window_overlap_ratio=0.5, prev_video_results=None, 
+                 event_loss_weight=0.0, event_loss_start_epoch=0.15, event_loss_thre=50, event_threshold=0.1, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.has_im_poses = True  # by definition of this class
@@ -52,6 +55,14 @@ class PointCloudOptimizer(BasePCOptimizer):
         self.motion_mask_thre = motion_mask_thre
         self.batchify = batchify
         self.window_wise = window_wise
+        
+        # 事件损失相关参数
+        self.event_loss_weight = event_loss_weight
+        self.event_loss_start_epoch = event_loss_start_epoch
+        self.event_loss_thre = event_loss_thre
+        self.event_threshold = event_threshold
+        self.event_loss_flag = False
+        self.img_data = None  # 用于存储用于事件损失计算的图像数据
 
         # adding thing to optimize
         self.im_depthmaps = nn.ParameterList(torch.randn(H, W)/10-3 for H, W in self.imshapes)  # log(depth)
@@ -147,6 +158,10 @@ class PointCloudOptimizer(BasePCOptimizer):
                     self.refine_motion_mask_w_sam2()
             else:
                 self.sam2_dynamic_masks = None
+                
+        # 加载事件数据（如果event_loss_weight > 0）
+        if self.event_loss_weight > 0:
+            self.event_data = self.load_event_data()
 
     def _validate_prev_results(self):
         """Verify the format of the previous video data"""
@@ -777,6 +792,8 @@ class PointCloudOptimizer(BasePCOptimizer):
         else:
             temporal_smoothing_loss = 0
 
+        # 计算flow loss
+        flow_loss = 0
         if self.flow_loss_weight > 0 and epoch >= self.num_total_iter * self.flow_loss_start_epoch: # enable flow loss after certain epoch
             R_all, T_all = self.get_im_poses()[:,:3].split([3, 1], dim=-1)
             R1, T1 = R_all[self._ei], T_all[self._ei]
@@ -800,8 +817,69 @@ class PointCloudOptimizer(BasePCOptimizer):
             if flow_loss.item() > self.flow_loss_thre and self.flow_loss_thre > 0: 
                 flow_loss = 0
                 self.flow_loss_flag = True
-        else:    
-            flow_loss = 0
+                
+        # 计算event loss
+        event_loss = 0
+        if self.event_loss_weight > 0 and epoch >= self.num_total_iter * self.event_loss_start_epoch:
+            # 获取图像数据用于强度计算
+            if self.img_data is None:
+                self.img_data = self.load_image_data()
+            
+            # 如果已经在flow loss计算中获取了ego_flow，可以直接使用
+            if 'ego_flow_1_2' in locals():
+                # 获取GT事件数据
+                event_data_all = torch.stack(self.event_data)
+                event_data1 = event_data_all[self._ei]
+                event_data2 = event_data_all[self._ej]
+                
+                # 准备图像数据
+                img_data = None
+                if self.img_data is not None:
+                    # 选择对应的图像对
+                    img1 = self.img_data[self._ei]
+                    img2 = self.img_data[self._ej]
+                    img_data = torch.stack([img1, img2], dim=1)  # [B, 2, 3, H, W]
+                
+                # 计算事件一致性损失
+                event_loss_i = self.compute_event_loss(ego_flow_1_2[:, :2, ...], event_data1, ~dynamic_mask1)
+                event_loss_j = self.compute_event_loss(ego_flow_2_1[:, :2, ...], event_data2, ~dynamic_mask2)
+                event_loss = event_loss_i + event_loss_j
+                
+                if event_loss.item() > self.event_loss_thre and self.event_loss_thre > 0:
+                    event_loss = 0
+                    self.event_loss_flag = True
+            else:
+                # 如果没有计算flow loss，则需要计算ego_flow
+                R_all, T_all = self.get_im_poses()[:,:3].split([3, 1], dim=-1)
+                R1, T1 = R_all[self._ei], T_all[self._ei]
+                R2, T2 = R_all[self._ej], T_all[self._ej]
+                K_all = self.get_intrinsics()
+                inv_K_all = torch.linalg.inv(K_all)
+                K_1, inv_K_1 = K_all[self._ei], inv_K_all[self._ei]
+                K_2, inv_K_2 = K_all[self._ej], inv_K_all[self._ej]
+                depth_all = torch.stack(self.get_depthmaps(raw=False)).unsqueeze(1)
+                depth1, depth2 = depth_all[self._ei], depth_all[self._ej]
+                disp_1, disp_2 = 1 / (depth1 + 1e-6), 1 / (depth2 + 1e-6)
+                ego_flow_1_2, _ = self.depth_wrapper(R1, T1, R2, T2, disp_1, K_2, inv_K_1)
+                ego_flow_2_1, _ = self.depth_wrapper(R2, T2, R1, T1, disp_2, K_1, inv_K_2)
+                
+                # 获取GT事件数据
+                event_data_all = torch.stack(self.event_data)
+                event_data1 = event_data_all[self._ei]
+                event_data2 = event_data_all[self._ej]
+                
+                # 获取动态掩码
+                dynamic_masks_all = torch.stack(self.dynamic_masks).to(self.device).unsqueeze(1)
+                dynamic_mask1, dynamic_mask2 = dynamic_masks_all[self._ei], dynamic_masks_all[self._ej]
+                
+                # 计算事件一致性损失
+                event_loss_i = self.compute_event_loss(ego_flow_1_2[:, :2, ...], event_data1, ~dynamic_mask1)
+                event_loss_j = self.compute_event_loss(ego_flow_2_1[:, :2, ...], event_data2, ~dynamic_mask2)
+                event_loss = event_loss_i + event_loss_j
+                
+                if event_loss.item() > self.event_loss_thre and self.event_loss_thre > 0:
+                    event_loss = 0
+                    self.event_loss_flag = True
 
         if self.depth_regularize_weight > 0:
             init_depthmaps = torch.stack(self.get_init_depthmaps(raw=False)).unsqueeze(1)
@@ -812,9 +890,10 @@ class PointCloudOptimizer(BasePCOptimizer):
             depth_prior_loss = 0
 
         loss = (li + lj) * 1 + self.temporal_smoothing_weight * temporal_smoothing_loss + \
-                self.flow_loss_weight * flow_loss + self.depth_regularize_weight * depth_prior_loss
+                self.flow_loss_weight * flow_loss + self.depth_regularize_weight * depth_prior_loss + \
+                self.event_loss_weight * event_loss  # 添加event loss
 
-        return loss, flow_loss
+        return loss, flow_loss, event_loss
     
     def forward_window_wise(self, epoch=9999):
         pw_poses = self.get_win_pw_poses()  # cam-to-world
@@ -836,6 +915,8 @@ class PointCloudOptimizer(BasePCOptimizer):
         else:
             temporal_smoothing_loss = 0
 
+        # 计算flow loss
+        flow_loss = 0
         if self.flow_loss_weight > 0 and epoch >= self.num_total_iter * self.flow_loss_start_epoch: # enable flow loss after certain epoch
             R_all, T_all = self.get_win_im_poses()[:,:3].split([3, 1], dim=-1)
             R1, T1 = R_all[self._win_ei], T_all[self._win_ei]
@@ -859,8 +940,61 @@ class PointCloudOptimizer(BasePCOptimizer):
             if flow_loss.item() > self.flow_loss_thre and self.flow_loss_thre > 0: 
                 flow_loss = 0
                 self.flow_loss_flag = True
-        else:    
-            flow_loss = 0
+                
+        # 计算event loss
+        event_loss = 0
+        if self.event_loss_weight > 0 and epoch >= self.num_total_iter * self.event_loss_start_epoch:
+            # 如果已经计算了flow loss，直接使用ego_flow
+            if 'ego_flow_1_2' in locals():
+                # 获取当前窗口的事件数据
+                win_start = self.window_starts[self.window_idx]
+                win_end = win_start + self.window_size
+                event_data_all = torch.stack(self.event_data[win_start:win_end])
+                event_data1 = event_data_all[self._win_ei]
+                event_data2 = event_data_all[self._win_ej]
+                
+                # 计算事件一致性损失
+                event_loss_i = self.compute_event_loss(ego_flow_1_2[:, :2, ...], event_data1, ~dynamic_mask1)
+                event_loss_j = self.compute_event_loss(ego_flow_2_1[:, :2, ...], event_data2, ~dynamic_mask2)
+                event_loss = event_loss_i + event_loss_j
+                
+                if event_loss.item() > self.event_loss_thre and self.event_loss_thre > 0:
+                    event_loss = 0
+                    self.event_loss_flag = True
+            else:
+                # 如果没有计算flow loss，需要计算ego_flow
+                R_all, T_all = self.get_win_im_poses()[:,:3].split([3, 1], dim=-1)
+                R1, T1 = R_all[self._win_ei], T_all[self._win_ei]
+                R2, T2 = R_all[self._win_ej], T_all[self._win_ej]
+                K_all = self.get_win_intrinsics()
+                inv_K_all = torch.linalg.inv(K_all)
+                K_1, inv_K_1 = K_all[self._win_ei], inv_K_all[self._win_ei]
+                K_2, inv_K_2 = K_all[self._win_ej], inv_K_all[self._win_ej]
+                depth_all = torch.stack(self.get_win_depthmaps(raw=False)).unsqueeze(1)
+                depth1, depth2 = depth_all[self._win_ei], depth_all[self._win_ej]
+                disp_1, disp_2 = 1 / (depth1 + 1e-6), 1 / (depth2 + 1e-6)
+                ego_flow_1_2, _ = self.depth_wrapper(R1, T1, R2, T2, disp_1, K_2, inv_K_1)
+                ego_flow_2_1, _ = self.depth_wrapper(R2, T2, R1, T1, disp_2, K_1, inv_K_2)
+                
+                # 获取当前窗口的事件数据
+                win_start = self.window_starts[self.window_idx]
+                win_end = win_start + self.window_size
+                event_data_all = torch.stack(self.event_data[win_start:win_end])
+                event_data1 = event_data_all[self._win_ei]
+                event_data2 = event_data_all[self._win_ej]
+                
+                # 获取动态掩码
+                dynamic_masks_all = torch.stack(self.win_dynamic_masks).to(self.device).unsqueeze(1)
+                dynamic_mask1, dynamic_mask2 = dynamic_masks_all[self._win_ei], dynamic_masks_all[self._win_ej]
+                
+                # 计算事件一致性损失
+                event_loss_i = self.compute_event_loss(ego_flow_1_2[:, :2, ...], event_data1, ~dynamic_mask1)
+                event_loss_j = self.compute_event_loss(ego_flow_2_1[:, :2, ...], event_data2, ~dynamic_mask2)
+                event_loss = event_loss_i + event_loss_j
+                
+                if event_loss.item() > self.event_loss_thre and self.event_loss_thre > 0:
+                    event_loss = 0
+                    self.event_loss_flag = True
 
         if self.depth_regularize_weight > 0:
             init_depthmaps = torch.stack(self.get_win_init_depthmaps(raw=False)).unsqueeze(1)
@@ -871,9 +1005,10 @@ class PointCloudOptimizer(BasePCOptimizer):
             depth_prior_loss = 0
 
         loss = (li + lj) * 1 + self.temporal_smoothing_weight * temporal_smoothing_loss + \
-                self.flow_loss_weight * flow_loss + self.depth_regularize_weight * depth_prior_loss
+                self.flow_loss_weight * flow_loss + self.depth_regularize_weight * depth_prior_loss + \
+                self.event_loss_weight * event_loss  # 添加event loss
         
-        return loss, flow_loss
+        return loss, flow_loss, event_loss
     
     def forward_non_batchify(self, epoch=9999):
 
@@ -923,6 +1058,10 @@ class PointCloudOptimizer(BasePCOptimizer):
             K_all = self.get_intrinsics()    # (n_imgs, 3, 3)
             inv_K_all = torch.linalg.inv(K_all)
             depthmaps = self.get_depthmaps(raw=False)  # list of depth maps (H, W)
+            
+            # 为了共享ego_flow计算结果，预先创建列表存储
+            ego_flows_1_2 = []
+            ego_flows_2_1 = []
 
             for e, (i, j) in enumerate(self.edges):
                 # Get the rotation, translation, and intrinsics for the two frames
@@ -945,6 +1084,10 @@ class PointCloudOptimizer(BasePCOptimizer):
                 # Note that DepthBasedWarping expects batch dimension, so add unsqueeze(0)
                 ego_flow_1_2, _ = self.depth_wrapper(R1, T1, R2, T2, disp_1, K2, inv_K1)
                 ego_flow_2_1, _ = self.depth_wrapper(R2, T2, R1, T1, disp_2, K1, inv_K2)
+                
+                # 存储计算结果
+                ego_flows_1_2.append(ego_flow_1_2)
+                ego_flows_2_1.append(ego_flow_2_1)
 
                 # Get the corresponding dynamic region masks (if any)
                 dynamic_mask_i = self.dynamic_masks[i]  # shape: (H, W)
@@ -973,12 +1116,100 @@ class PointCloudOptimizer(BasePCOptimizer):
                 flow_loss = 0.0
 
             loss += self.flow_loss_weight * flow_loss
+            
+        # 计算event loss
+        event_loss = 0.0
+        if self.event_loss_weight > 0 and epoch >= self.num_total_iter * self.event_loss_start_epoch:
+            # 检查是否已经计算了ego_flow
+            if 'ego_flows_1_2' in locals() and len(ego_flows_1_2) > 0:
+                # 已经有了ego_flow，直接使用
+                for e, (i, j) in enumerate(self.edges):
+                    # 获取对应的事件数据
+                    event_data_i = self.event_data[i]
+                    event_data_j = self.event_data[j]
+                    
+                    # 获取对应的动态区域掩码
+                    dynamic_mask_i = self.dynamic_masks[i]
+                    dynamic_mask_j = self.dynamic_masks[j]
+                    
+                    # 计算事件一致性损失
+                    event_loss_i = self.compute_event_loss(
+                        ego_flows_1_2[e][0, :2, ...],  # 取出第e对的ego_flow
+                        event_data_i,
+                        ~dynamic_mask_i
+                    )
+                    event_loss_j = self.compute_event_loss(
+                        ego_flows_2_1[e][0, :2, ...],
+                        event_data_j,
+                        ~dynamic_mask_j
+                    )
+                    
+                    event_loss += (event_loss_i + event_loss_j)
+            else:
+                # 需要计算ego_flow
+                im_poses = self.get_im_poses()   # (n_imgs, 4, 4)
+                K_all = self.get_intrinsics()    # (n_imgs, 3, 3)
+                inv_K_all = torch.linalg.inv(K_all)
+                depthmaps = self.get_depthmaps(raw=False)  # list of depth maps (H, W)
+                
+                for e, (i, j) in enumerate(self.edges):
+                    # 获取相机参数
+                    R1 = im_poses[i][:3, :3].unsqueeze(0)
+                    T1 = im_poses[i][:3, 3].unsqueeze(-1).unsqueeze(0)
+                    R2 = im_poses[j][:3, :3].unsqueeze(0)
+                    T2 = im_poses[j][:3, 3].unsqueeze(-1).unsqueeze(0)
+                    K1 = K_all[i].unsqueeze(0)
+                    K2 = K_all[j].unsqueeze(0)
+                    inv_K1 = inv_K_all[i].unsqueeze(0)
+                    inv_K2 = inv_K_all[j].unsqueeze(0)
+                    
+                    # 计算深度和视差
+                    depth1 = depthmaps[i].unsqueeze(0).unsqueeze(1)
+                    depth2 = depthmaps[j].unsqueeze(0).unsqueeze(1)
+                    disp_1 = 1.0 / (depth1 + 1e-6)
+                    disp_2 = 1.0 / (depth2 + 1e-6)
+                    
+                    # 计算ego_flow
+                    ego_flow_1_2, _ = self.depth_wrapper(R1, T1, R2, T2, disp_1, K2, inv_K1)
+                    ego_flow_2_1, _ = self.depth_wrapper(R2, T2, R1, T1, disp_2, K1, inv_K2)
+                    
+                    # 获取事件数据和动态掩码
+                    event_data_i = self.event_data[i]
+                    event_data_j = self.event_data[j]
+                    dynamic_mask_i = self.dynamic_masks[i]
+                    dynamic_mask_j = self.dynamic_masks[j]
+                    
+                    # 计算事件一致性损失
+                    event_loss_i = self.compute_event_loss(
+                        ego_flow_1_2[0, :2, ...],
+                        event_data_i,
+                        ~dynamic_mask_i
+                    )
+                    event_loss_j = self.compute_event_loss(
+                        ego_flow_2_1[0, :2, ...],
+                        event_data_j,
+                        ~dynamic_mask_j
+                    )
+                    
+                    event_loss += (event_loss_i + event_loss_j)
+            
+            # 平均损失
+            event_loss /= self.n_edges
+            print(f'event loss: {event_loss.item()}')
+            
+            # 处理过大的事件损失
+            if event_loss.item() > self.event_loss_thre and self.event_loss_thre > 0:
+                event_loss = 0.0
+                self.event_loss_flag = True
+                
+            # 将事件损失加入总损失
+            loss += self.event_loss_weight * event_loss
 
         # --(4) Add depth regularization (depth_prior_loss) to constrain the initial depth--
+        depth_prior_loss = 0.0
         if self.depth_regularize_weight > 0:
             init_depthmaps = self.get_init_depthmaps(raw=False)  # initial depth maps
             current_depthmaps = self.get_depthmaps(raw=False)     # current optimized depth maps
-            depth_prior_loss = 0.0
             for i in range(self.n_imgs):
                 # Apply constraints on static regions (ignore dynamic regions)
                 # Make sure the shape has the batch dimension (B,1,H,W)
@@ -989,15 +1220,16 @@ class PointCloudOptimizer(BasePCOptimizer):
                 )
             loss += self.depth_regularize_weight * depth_prior_loss
 
-        return loss, flow_loss
+        return loss, flow_loss, event_loss
 
     def forward(self, epoch=9999):
         if self.batchify:
-            return self.forward_batchify(epoch)
+            loss, flow_loss, event_loss = self.forward_batchify(epoch)
         elif self.window_wise:
-            return self.forward_window_wise(epoch)
+            loss, flow_loss, event_loss = self.forward_window_wise(epoch)
         else:
-            return self.forward_non_batchify(epoch)
+            loss, flow_loss, event_loss = self.forward_non_batchify(epoch)
+        return loss, flow_loss, event_loss
         
     def clean_prev_results(self):
         self.n_imgs = self.n_imgs - self.n_prev_frames
@@ -1026,6 +1258,345 @@ class PointCloudOptimizer(BasePCOptimizer):
         # Combined loss (one can weigh these differently if needed)
         pose_loss = rotation_loss + translation_loss * self.translation_weight
         return pose_loss
+
+    def load_event_data(self):
+        """
+        加载事件数据，从MVSEC数据集中读取体素网格（voxel grid）格式的事件数据。
+        改进版本包含缓存机制、简化的路径推断和批量加载功能。
+        """
+        print('Loading event data...')
+        
+        # 创建静态缓存字典，用于存储已加载的事件数据
+        if not hasattr(self, '_event_cache'):
+            self._event_cache = {}
+        
+        try:
+            # 导入事件数据读取函数
+            from dust3r.utils.event import read_voxel_hdf5
+            
+            event_data = []
+            
+            # 获取所有图像的基本目录，用于确定数据集结构
+            base_dirs = set()
+            for img in self.imgs:
+                if 'instance' in img:
+                    img_path = img['instance']
+                    base_dirs.add(os.path.dirname(os.path.dirname(img_path)))
+            
+            # 尝试识别数据集结构（是否为MVSEC格式）
+            is_mvsec_format = any('MVSEC' in d or 'mvsec' in d for d in base_dirs)
+            
+            # 批量处理加载任务
+            load_tasks = []
+            for idx, img in enumerate(self.imgs):
+                if 'event_voxel' in img:
+                    # 如果图像已经包含了预处理的事件体素数据，直接使用
+                    event_tensor = img['event_voxel'].to(self.device)
+                    event_data.append(event_tensor[0] if event_tensor.dim() == 4 else event_tensor)
+                elif 'event_path' in img:
+                    # 如果图像包含事件数据路径
+                    event_path = img['event_path']
+                    load_tasks.append((idx, event_path, None))
+                elif 'instance' in img:
+                    # 通过图像路径推断事件数据路径
+                    img_path = img['instance']
+                    img_dir = os.path.dirname(img_path)
+                    img_name = os.path.basename(img_path)
+                    
+                    # 从图像名称中提取索引
+                    # 支持多种格式：000000_left.png, 000000.png等
+                    img_idx = None
+                    try:
+                        if '_left' in img_name or '_right' in img_name:
+                            img_idx = int(img_name.split('_')[0])
+                        else:
+                            img_idx = int(os.path.splitext(img_name)[0])
+                    except ValueError:
+                        print(f"Warning: Could not extract index from image name: {img_name}")
+                        img_idx = idx  # 回退到使用当前索引
+                    
+                    # 确定事件数据路径
+                    event_path = None
+                    
+                    if is_mvsec_format:
+                        # MVSEC数据集标准路径格式
+                        # image/left -> event_left/event50_voxel_left
+                        candidates = [
+                            # 标准MVSEC路径
+                            os.path.join(os.path.dirname(os.path.dirname(img_dir)), 
+                                        'event_left', 'event50_voxel_left',
+                                        f'{img_idx:06d}_{img_idx+1:06d}_event.hdf5'),
+                            # 备用格式
+                            os.path.join(img_dir.replace('image_left', 'event_left/event50_voxel_left'),
+                                        f'{img_idx:06d}_{img_idx+1:06d}_event.hdf5')
+                        ]
+                    else:
+                        # 通用格式，尝试从图像目录推断事件目录
+                        candidates = [
+                            # 替换image为event
+                            os.path.join(img_dir.replace('image', 'event').replace('images', 'events'),
+                                        f'{img_idx:06d}_event.hdf5'),
+                            # 平行目录结构
+                            os.path.join(os.path.dirname(img_dir), 'event',
+                                        f'{img_idx:06d}_event.hdf5')
+                        ]
+                    
+                    # 将当前索引和候选路径列表添加到加载任务
+                    load_tasks.append((idx, None, candidates))
+                else:
+                    # 记录缺少信息的图像
+                    print(f"Warning: No event data or path information for image at index {idx}")
+                    
+                    # 更健壮地获取图像尺寸
+                    H, W = self._get_image_size(img)
+                    event_tensor = torch.zeros((5, H, W)).to(self.device)  # MVSEC使用5个通道的体素网格
+                    event_data.append(event_tensor)
+            
+            # 批量处理加载任务
+            missing_indices = []
+            for idx, event_path, candidates in load_tasks:
+                event_tensor = None
+                
+                # 首先检查缓存
+                if event_path and event_path in self._event_cache:
+                    event_tensor = self._event_cache[event_path]
+                else:
+                    # 尝试直接路径或候选路径
+                    path_to_try = event_path
+                    
+                    if not path_to_try and candidates:
+                        # 尝试所有候选路径
+                        for candidate in candidates:
+                            if os.path.exists(candidate):
+                                path_to_try = candidate
+                                break
+                    
+                    if path_to_try and os.path.exists(path_to_try):
+                        try:
+                            # 读取事件数据并转换为张量
+                            event_voxel = read_voxel_hdf5(path_to_try)
+                            event_tensor = torch.from_numpy(event_voxel).float().to(self.device)
+                            # 缓存结果
+                            self._event_cache[path_to_try] = event_tensor
+                        except Exception as e:
+                            print(f"Error reading event data from {path_to_try}: {e}")
+                
+                if event_tensor is not None:
+                    event_data.append(event_tensor)
+                else:
+                    # 记录未找到数据的索引，稍后处理
+                    missing_indices.append(idx)
+            
+            # 处理缺失的事件数据
+            if missing_indices:
+                print(f"Warning: Could not find event data for {len(missing_indices)} images")
+                
+                # 对于缺失的事件数据，使用零张量或插值
+                for idx in missing_indices:
+                    img = self.imgs[idx]
+                    
+                    # 更健壮地获取图像尺寸
+                    H, W = self._get_image_size(img)
+                    
+                    # 尝试使用相邻帧的事件数据进行插值
+                    if len(event_data) > 0 and idx > 0 and idx - 1 < len(event_data):
+                        # 如果有相邻帧，使用相邻帧的事件数据
+                        print(f"  Using neighboring frame's event data for image at index {idx}")
+                        neighbor_idx = min(idx - 1, len(event_data) - 1)
+                        event_tensor = event_data[neighbor_idx].clone()
+                        
+                        # 确保尺寸匹配
+                        if event_tensor.shape[-2:] != (H, W):
+                            print(f"  Resizing event tensor from {event_tensor.shape[-2:]} to {(H, W)}")
+                            event_tensor = torch.nn.functional.interpolate(
+                                event_tensor.unsqueeze(0), size=(H, W), mode='bilinear', align_corners=False
+                            ).squeeze(0)
+                    else:
+                        # 否则创建零张量
+                        print(f"  Creating zero tensor for image at index {idx}")
+                        event_tensor = torch.zeros((5, H, W)).to(self.device)
+                    
+                    # 插入到正确的位置
+                    while len(event_data) <= idx:
+                        event_data.append(None)
+                    event_data[idx] = event_tensor
+            
+            print(f'Event data loaded: {len(event_data)} event tensors')
+            
+            # 确保每张图像都有对应的事件数据
+            assert len(event_data) == len(self.imgs), f"Mismatch between event data ({len(event_data)}) and images ({len(self.imgs)})"
+            
+            return event_data
+        
+        except Exception as e:
+            print(f"Error loading event data: {e}")
+            # 如果整个加载过程失败，返回空的占位符数据
+            event_data = []
+            for img in self.imgs:
+                # 更健壮地获取图像尺寸
+                H, W = self._get_image_size(img)
+                event_tensor = torch.zeros((5, H, W)).to(self.device)  # MVSEC使用5个通道的体素网格
+                event_data.append(event_tensor)
+            print(f'Created placeholder event data: {len(event_data)} event tensors')
+            return event_data
+    
+    def _get_image_size(self, img):
+        """
+        更健壮地获取图像尺寸，支持多种图像数据格式
+        
+        Args:
+            img: 图像数据字典
+        
+        Returns:
+            H, W: 图像高度和宽度
+        """
+        # 优先尝试获取img中的图像数据
+        if 'img' in img and hasattr(img['img'], 'shape'):
+            # 标准数据格式：img键包含图像张量
+            if img['img'].dim() == 4:  # [B, C, H, W]
+                return img['img'].shape[-2], img['img'].shape[-1]
+            elif img['img'].dim() == 3:  # [C, H, W]
+                return img['img'].shape[-2], img['img'].shape[-1]
+            elif img['img'].dim() == 2:  # [H, W]
+                return img['img'].shape
+        
+        # 尝试从true_shape获取尺寸
+        if 'true_shape' in img:
+            shape = img['true_shape']
+            if isinstance(shape, (list, tuple, np.ndarray)) and len(shape) == 2:
+                return shape[0], shape[1]
+        
+        # 尝试从其他信息推断尺寸
+        if 'mask' in img and hasattr(img['mask'], 'shape'):
+            if img['mask'].dim() >= 2:
+                return img['mask'].shape[-2], img['mask'].shape[-1]
+        
+        if 'dynamic_mask' in img and hasattr(img['dynamic_mask'], 'shape'):
+            if img['dynamic_mask'].dim() >= 2:
+                return img['dynamic_mask'].shape[-2], img['dynamic_mask'].shape[-1]
+        
+        # 如果有instance，尝试从文件中读取尺寸
+        if 'instance' in img:
+            try:
+                import cv2
+                image = cv2.imread(img['instance'])
+                if image is not None:
+                    return image.shape[0], image.shape[1]
+            except:
+                pass
+        
+        # 获取当前模型/场景的默认尺寸
+        if hasattr(self, 'imshapes') and len(self.imshapes) > 0:
+            # 返回第一个图像的尺寸作为默认值
+            print(f"  使用模型默认图像尺寸: {self.imshapes[0]}")
+            return self.imshapes[0]
+        
+        # 检查是否有自定义设置的默认尺寸
+        if hasattr(self, 'default_img_size'):
+            print(f"  使用自定义默认图像尺寸: {self.default_img_size}")
+            return self.default_img_size
+            
+        # 默认尺寸（使用更大的尺寸，确保与常见模型尺寸匹配）
+        default_size = (384, 512)  # 更常见的高分辨率
+        print(f"  Warning: Could not determine image size, using default size {default_size}")
+        return default_size  # 返回更通用的高分辨率尺寸，提高兼容性
+
+    def compute_event_loss(self, ego_flow, event_gt, valid_mask=None):
+        """
+        计算事件一致性损失
+        
+        Args:
+            ego_flow: 从姿态和深度计算得到的光流 [B, 2, H, W] 或 [2, H, W]
+            event_gt: 真实事件数据 [B, C, H, W] 或 [C, H, W]（MVSEC使用5通道的体素网格表示）
+            valid_mask: 有效区域掩码 [B, 1, H, W] 或 [H, W]
+            
+        Returns:
+            event_loss: 事件一致性损失值
+        """
+        # 确保输入维度正确
+        if ego_flow.dim() == 3:  # [2, H, W]
+            ego_flow = ego_flow.unsqueeze(0)  # [1, 2, H, W]
+        
+        if event_gt.dim() == 3:  # [C, H, W]
+            event_gt = event_gt.unsqueeze(0)  # [1, C, H, W]
+        
+        # 检查尺寸是否匹配
+        B, _, H, W = ego_flow.shape
+        _, C, event_H, event_W = event_gt.shape
+        
+        if event_H != H or event_W != W:
+            print(f"调整事件数据尺寸从 ({event_H}, {event_W}) 到 ({H}, {W})")
+            event_gt = torch.nn.functional.interpolate(
+                event_gt, size=(H, W), mode='bilinear', align_corners=False
+            )
+        
+        # 确保有效掩码也具有正确的维度
+        if valid_mask is not None:
+            if valid_mask.dim() == 2:  # [H, W]
+                valid_mask = valid_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+            
+            # 检查掩码尺寸
+            _, _, mask_H, mask_W = valid_mask.shape
+            if mask_H != H or mask_W != W:
+                print(f"调整掩码尺寸从 ({mask_H}, {mask_W}) 到 ({H}, {W})")
+                valid_mask = torch.nn.functional.interpolate(
+                    valid_mask.float(), size=(H, W), mode='nearest'
+                ).bool()
+        
+        # 获取对应的图像数据（如果可用）
+        imgs = None
+        if hasattr(self, 'img_data') and self.img_data is not None:
+            # 从图像数据中提取对应的帧
+            # 注意：这需要在调用前设置好self.img_data，包含要比较的图像对
+            imgs = self.img_data
+            
+            # 如果图像尺寸与光流不匹配，也进行调整
+            if imgs.dim() >= 4:
+                # 检查第一个维度是否是批量维度
+                img_batch_dim = imgs.shape[0] if imgs.shape[0] > 1 else imgs.shape[1]
+                img_H, img_W = imgs.shape[-2], imgs.shape[-1]
+                
+                if img_H != H or img_W != W:
+                    print(f"调整图像数据尺寸从 ({img_H}, {img_W}) 到 ({H}, {W})")
+                    # 根据图像数据格式决定如何调整
+                    if imgs.dim() == 5:  # [B, 2, 3, H, W]
+                        reshaped_imgs = imgs.view(-1, imgs.shape[2], img_H, img_W)
+                        reshaped_imgs = torch.nn.functional.interpolate(
+                            reshaped_imgs, size=(H, W), mode='bilinear', align_corners=False
+                        )
+                        imgs = reshaped_imgs.view(imgs.shape[0], imgs.shape[1], imgs.shape[2], H, W)
+                    elif imgs.dim() == 4:  # [B, 3, H, W] or [2, 3, H, W]
+                        imgs = torch.nn.functional.interpolate(
+                            imgs, size=(H, W), mode='bilinear', align_corners=False
+                        )
+        
+        # 使用新的基于强度的事件损失
+        threshold = getattr(self, 'event_threshold', 0.1)
+        return intensity_based_event_loss(ego_flow, event_gt, imgs, valid_mask, threshold)
+
+    # 添加图像数据加载方法
+    def load_image_data(self):
+        """
+        加载用于事件损失计算的图像数据
+        """
+        try:
+            # 检查是否有图像数据
+            if self.imgs is None:
+                print("No image data available for event loss computation")
+                return None
+            
+            # 转换图像数据格式以便于事件损失计算
+            # 假设self.imgs是RGB格式的图像列表
+            img_data = torch.stack([torch.tensor(img) for img in self.imgs], dim=0)
+            
+            # 图像形状调整为模型期望的格式
+            if img_data.ndim == 3:  # (N, H, W, 3)
+                img_data = img_data.permute(0, 3, 1, 2)  # 转为(N, 3, H, W)
+            
+            return img_data.to(self.device)
+        except Exception as e:
+            print(f"Error loading image data: {e}")
+            return None
 
 def _fast_depthmap_to_pts3d(depth, pixel_grid, focal, pp):
     pp = pp.unsqueeze(1)

@@ -36,8 +36,8 @@ opt = {
     "ape": False,
     "patch_norm": True,
     "use_checkpoint": False,
-    "pretrained_checkpoint": "checkpoints/pr.pt",  # 设置 checkpoint 路径
-    "pretrained_checkpoint_type": "event",
+    "pretrained_checkpoint": None,  # 设置为None，避免在evaluation模式下加载事件预训练模型
+    "pretrained_checkpoint_type": None,  # 同样设置为None
     "keep_patch_keys": False,
 }
 

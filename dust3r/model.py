@@ -75,6 +75,7 @@ class AsymmetricCroCo3DStereo (
                  use_lowlight_enhancer=False,  # Flag to enable EvLightEnhancer
                  use_cross_attention_for_event=False,  # Flag to enable cross attention in event encoder
                  event_enhance_mode='none',  # 'none', 'easy', or 'complex'
+                 save_enhancement_info=False,  # 是否为损失计算保存增强相关信息
                  **croco_kwargs):
         self.patch_embed_cls = patch_embed_cls
         self.use_event_control = use_event_control
@@ -83,6 +84,7 @@ class AsymmetricCroCo3DStereo (
         self.use_lowlight_enhancer = use_lowlight_enhancer
         self.use_cross_attention_for_event = use_cross_attention_for_event
         self.event_enhance_mode = event_enhance_mode
+        self.save_enhancement_info = save_enhancement_info  # 是否保存增强相关信息用于损失计算
 
         self.croco_args = fill_default_args(croco_kwargs, super().__init__)
         super().__init__(**croco_kwargs)
@@ -98,6 +100,14 @@ class AsymmetricCroCo3DStereo (
                                     croco_kwargs.get('enc_embed_dim', 768), croco_kwargs.get('dec_embed_dim', 768))
             self.patch_size = croco_kwargs.get('patch_size', 16)
             self.ll_threshold_ratio = 0.5
+            
+        # 增强图像缓存
+        self.original_images = {}
+        self.enhanced_images = {}
+        self.snr_maps = {}
+        self.illumination_maps = {}
+        self.reflectance_maps = {}
+
     def zero_module(self, module):
         for p in module.parameters():
             nn.init.zeros_(p)
@@ -202,12 +212,31 @@ class AsymmetricCroCo3DStereo (
     def _encode_image(self, image, true_shape, event_voxel=None, LL_mask=None):
 
         if self.use_lowlight_enhancer:
+            # 保存原始图像用于计算增强损失
+            batch_idx = image.shape[0]
+            self.original_images[batch_idx] = image.clone()
+            
+            # 执行图像增强
             old_image = image.clone()
-            image, snr_map = self.enhancer(image, event_voxel)
+            # 现在enhancer可能会返回四个值：enhanced_image, snr_map, illumination, reflectance
+            result = self.enhancer(image, event_voxel)
+            
+            if len(result) == 4:  # 如果有四个返回值 - Zero-DCE风格的结果
+                image, snr_map, illumination, reflectance = result
+                # 保存照明图和反射率图用于ZeroDCE损失计算
+                self.illumination_maps[batch_idx] = illumination.clone() if illumination is not None else None
+                self.reflectance_maps[batch_idx] = reflectance.clone() if reflectance is not None else None
+            else:  # 兼容旧版本
+                image, snr_map = result
+                illumination, reflectance = None, None
+            
+            # 保存增强后的图像和SNR图用于计算增强损失
+            self.enhanced_images[batch_idx] = image.clone()
+            self.snr_maps[batch_idx] = snr_map.clone()
+            
             # visualize_image_snr(old_image, image, snr_map, save_path="visualization/image_snr_visualization.png")
         else:
             snr_map = None
-
 
         # embed the image into patches  (x has size B x Npatches x C)
         x, pos = self.patch_embed(image, true_shape=true_shape)
@@ -247,6 +276,7 @@ class AsymmetricCroCo3DStereo (
             # [2, 768, 9, 16]
 
         x = self.enc_norm(x)
+        # exit(0)
         return x, pos, None
 
     def _encode_image_pairs(self, img1, img2, true_shape1, true_shape2, event_voxel1=None, event_voxel2=None, LL_mask1=None, LL_mask2=None):
@@ -344,4 +374,28 @@ class AsymmetricCroCo3DStereo (
             res2 = self._downstream_head(2, [tok.float() for tok in dec2], shape2)
 
         res2['pts3d_in_other_view'] = res2.pop('pts3d')  # predict view2's pts3d in view1's frame
+        
+        # 添加增强图像信息到结果中，用于计算损失
+        if self.use_lowlight_enhancer and self.save_enhancement_info:
+            B = view1['img'].shape[0]
+            res1['original_image'] = self.original_images.get(B, None)
+            res1['enhanced_image'] = self.enhanced_images.get(B, None)
+            res1['snr_map'] = self.snr_maps.get(B, None)
+            # 添加照明图和反射率图
+            res1['illumination_map'] = self.illumination_maps.get(B, None)
+            res1['reflectance_map'] = self.reflectance_maps.get(B, None)
+            res1['use_enhancement_loss'] = True
+            
+            # 清除缓存
+            if B in self.original_images:
+                del self.original_images[B]
+            if B in self.enhanced_images:
+                del self.enhanced_images[B]
+            if B in self.snr_maps:
+                del self.snr_maps[B]
+            if B in self.illumination_maps:
+                del self.illumination_maps[B]
+            if B in self.reflectance_maps:
+                del self.reflectance_maps[B]
+        
         return res1, res2

@@ -479,6 +479,7 @@ def global_alignment_loop(net, lr=0.01, niter=300, schedule='cosine', lr_min=1e-
     optimizer = torch.optim.Adam(params, lr=lr, betas=(0.9, 0.9))
 
     loss = float('inf')
+    
     if verbose:
         with tqdm.tqdm(total=niter) as bar:
             while bar.n < bar.total:
@@ -491,13 +492,15 @@ def global_alignment_loop(net, lr=0.01, niter=300, schedule='cosine', lr_min=1e-
                         depth_map_save_path = os.path.join(depth_map_save_dir, f'depthmaps_{i}_iter_{bar.n}.png')
                         plt.imsave(depth_map_save_path, depth_map.detach().cpu().numpy(), cmap='jet')
                     print(f"Saved depthmaps at iteration {bar.n} to {depth_map_save_dir}")
-                loss, flow_loss, lr = global_alignment_iter(net, bar.n, niter, lr_base, lr_min, optimizer, schedule, 
+                loss, flow_loss, event_loss, lr = global_alignment_iter(net, bar.n, niter, lr_base, lr_min, optimizer, schedule, 
                                                  temporal_smoothing_weight=temporal_smoothing_weight)
-                bar.set_postfix_str(f'{lr=:g} loss={loss:g} flow_loss={flow_loss:g}')
+                
+                bar.set_postfix_str(f'{lr=:g} loss={loss:g} flow_loss={flow_loss:g} event_loss={event_loss:g}')
+                
                 bar.update()
     else:
         for n in range(niter):
-            loss, _, _ = global_alignment_iter(net, n, niter, lr_base, lr_min, optimizer, schedule, 
+            loss, _, _, _ = global_alignment_iter(net, n, niter, lr_base, lr_min, optimizer, schedule, 
                                             temporal_smoothing_weight=temporal_smoothing_weight)
     return loss
 
@@ -507,6 +510,7 @@ def window_wise_alignment_loop(net, lr=0.01, niter=300, schedule='cosine', lr_mi
     net.im_focals.requires_grad_(False)
     verbose = net.verbose
     lr_base = lr
+    
     for window_idx in range(net.num_windows):
         net.load_window_params(window_idx)
         # Create an optimizer (optimize only the trainable parameters of the current window)
@@ -534,13 +538,16 @@ def window_wise_alignment_loop(net, lr=0.01, niter=300, schedule='cosine', lr_mi
                             depth_map_save_path = os.path.join(depth_map_save_dir, f'depthmaps_{i}_iter_{bar.n}.png')
                             plt.imsave(depth_map_save_path, depth_map.detach().cpu().numpy(), cmap='jet')
                         print(f"Saved depthmaps at iteration {bar.n} to {depth_map_save_dir}")
-                    loss, flow_loss, lr = global_alignment_iter(net, bar.n, niter, lr_base, lr_min, optimizer, schedule, 
+                    
+                    loss, flow_loss, event_loss, lr = global_alignment_iter(net, bar.n, niter, lr_base, lr_min, optimizer, schedule, 
                                                     temporal_smoothing_weight=temporal_smoothing_weight)
-                    bar.set_postfix_str(f'{lr=:g} loss={loss:g} flow_loss={flow_loss:g}')
+                    
+                    bar.set_postfix_str(f'{lr=:g} loss={loss:g} flow_loss={flow_loss:g} event_loss={event_loss:g}')
+                    
                     bar.update()
         else:
             for n in range(niter):
-                loss, _, _ = global_alignment_iter(net, n, niter, lr_base, lr_min, optimizer, schedule, 
+                loss, _, _, _ = global_alignment_iter(net, n, niter, lr_base, lr_min, optimizer, schedule, 
                                                 temporal_smoothing_weight=temporal_smoothing_weight)
         net.save_window_params(window_idx)
     return loss
@@ -566,7 +573,7 @@ def global_alignment_iter(net, cur_iter, niter, lr_base, lr_min, optimizer, sche
     if net.empty_cache:
         torch.cuda.empty_cache()
     
-    loss, flow_loss = net(epoch=cur_iter)
+    loss, flow_loss, event_loss = net(epoch=cur_iter)
     
     if net.empty_cache:
         torch.cuda.empty_cache()
@@ -578,7 +585,7 @@ def global_alignment_iter(net, cur_iter, niter, lr_base, lr_min, optimizer, sche
     
     optimizer.step()
     
-    return float(loss), float(flow_loss), lr
+    return float(loss), float(flow_loss), float(event_loss), lr
 
 @torch.no_grad()
 def clean_pointcloud( im_confs, K, cams, depthmaps, all_pts3d, 
