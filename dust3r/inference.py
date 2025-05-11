@@ -57,7 +57,9 @@ def visualize_results(view1, view2, pred1, pred2, save_dir='./tmp', save_name=No
 
 def loss_of_one_batch(batch, model, criterion, device, symmetrize_batch=False, use_amp=False, ret=None):
     view1, view2 = batch
-    ignore_keys = set(['depthmap', 'dataset', 'label', 'instance', 'idx', 'true_shape', 'rng'])
+    # this condition is established when all data from the batch is from the same dataset split
+
+    ignore_keys = set(['depthmap', 'dataset', 'label', 'instance', 'idx', 'true_shape', 'rng', 'event_index', 'img_ts'])
     for view in batch:
         for name in view.keys():  # pseudo_focal
             if name in ignore_keys:

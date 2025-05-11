@@ -19,7 +19,8 @@ def eval_mono_depth_estimation(args, model, device):
     if metadata is None:
         raise ValueError(f"Unknown dataset: {args.eval_dataset}")
     
-    img_path = metadata.get('img_path')
+    all_img_path = metadata.get('all_img_path')
+    seq_img_path = metadata.get('seq_img_path')
     if 'img_path_func' in metadata:
         img_path = metadata['img_path_func'](args)
     
@@ -27,7 +28,7 @@ def eval_mono_depth_estimation(args, model, device):
     if process_func is None:
         raise ValueError(f"No processing function defined for dataset: {args.eval_dataset}")
     
-    for filelist, save_dir, event_filelist in process_func(args, img_path):
+    for filelist, save_dir, event_filelist in process_func(args, all_img_path):
         Path(save_dir).mkdir(parents=True, exist_ok=True)
         eval_mono_depth(args, model, device, filelist, save_dir=save_dir,event_filelist=event_filelist)
 

@@ -189,7 +189,7 @@ class MVSEC(BaseStereoViewDataset):
             rgb_image = cv2.cvtColor(rgb_image,cv2.COLOR_GRAY2RGB)
 
             # rgb_image = imreadlowlight_cv2(impath, brightness_factor=0.5, gamma=1.5, noise_std=0.05, as_uint8=True, lightup="clahe")
-            event_voxel = read_voxel_hdf5(eventpath)    # 6 H W
+            event_voxel = read_voxel_hdf5(eventpath,key='event_voxels')    # 6 H W
             depthmap = depth_read(depthpath).astype(np.float32)
             # set nan pixel to zero depth
             depthmap[np.isnan(depthmap)] = 0

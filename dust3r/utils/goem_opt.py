@@ -200,7 +200,6 @@ def warp_by_disp(src_R, src_t, tgt_R, tgt_t, K, src_disp, coord, inv_K, debug_mo
         relative_R, relative_t = get_relative_transform(
             src_R, src_t, tgt_R, tgt_t)
 
-        print(relative_t.shape)
         H_mat = K.matmul(relative_R.matmul(inv_K))  # Nx3x3
         flat_disp = src_disp.view([B, 1, H * W])  # Nx1xNpoints
         relative_t_flat = relative_t.expand([-1, -1, H*W])
@@ -237,7 +236,7 @@ def warp_by_disp(src_R, src_t, tgt_R, tgt_t, K, src_disp, coord, inv_K, debug_mo
         # TODO: if use event loss, use coord as index to get image intensity
         # need event stream from t to t'
 
-        return (tgt_coord - coord).view([B, 3, H, W]), tgt_coord
+        return (tgt_coord - coord).view([B, 3, H, W]), tgt_coord, coord
 
 
 def unproject_depth(depth, K_inv, R, t, coord):

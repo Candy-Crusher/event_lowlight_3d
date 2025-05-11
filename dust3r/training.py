@@ -107,7 +107,8 @@ def get_args_parser():
     parser.add_argument('--use_gt_focal', action='store_true', default=False, help='use ground truth focal length for pose optimization')
     parser.add_argument('--pose_schedule', default='linear', type=str, help='pose optimization schedule')
     
-    parser.add_argument('--flow_loss_weight', default=0.01, type=float, help='flow loss weight for pose optimization')
+    parser.add_argument('--flow_loss_weight', default=0.01, type=float, help='sflow loss weight for pose optimization')
+    parser.add_argument('--event_loss_weight', default=0, type=float, help='event loss weight for pose optimization')
     parser.add_argument('--flow_loss_fn', default='smooth_l1', type=str, help='flow loss type for pose optimization')
     parser.add_argument('--use_gt_mask', action='store_true', default=False, help='use gt mask for pose optimization, for sintel/davis')
     parser.add_argument('--motion_mask_thre', default=0.35, type=float, help='motion mask threshold for pose optimization')

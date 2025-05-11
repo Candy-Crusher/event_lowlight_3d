@@ -1,10 +1,89 @@
 import h5py
 import torch
 import torch.nn.functional as F
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+import datetime
+from scipy.ndimage import gaussian_filter
 
-def read_voxel_hdf5(file_path):
+class EventRepresentation:
+    def convert(self, x: torch.Tensor, y: torch.Tensor, pol: torch.Tensor, time: torch.Tensor):
+        raise NotImplementedError
+
+
+class VoxelGrid(EventRepresentation):
+    def __init__(self, channels: int, height: int, width: int, normalize: bool, use_weight: bool=True):
+        self.voxel_grid = torch.zeros((channels, height, width), dtype=torch.float, requires_grad=False)
+        self.nb_channels = channels
+        self.normalize = normalize
+        self.use_weight = use_weight
+
+    def convert(self, x: torch.Tensor, y: torch.Tensor, pol: torch.Tensor, time: torch.Tensor):
+        assert x.shape == y.shape == pol.shape == time.shape
+        assert x.ndim == 1
+
+        C, H, W = self.voxel_grid.shape
+        with torch.no_grad():
+            self.voxel_grid = self.voxel_grid.to(pol.device)
+            voxel_grid = self.voxel_grid.clone()
+
+            t_norm = time
+            t_norm = (C - 1) * (t_norm-t_norm[0]) / (t_norm[-1]-t_norm[0])
+
+            x0 = x.int()
+            y0 = y.int()
+            t0 = t_norm.int()
+
+            if pol.min() == 0:
+                value = 2*pol-1
+            else:
+                value = pol
+
+            for xlim in [x0,x0+1]:
+                for ylim in [y0,y0+1]:
+                    for tlim in [t0,t0+1]:
+
+                        mask = (xlim < W) & (xlim >= 0) & (ylim < H) & (ylim >= 0) & (tlim >= 0) & (tlim < self.nb_channels)
+                        if self.use_weight:
+                            interp_weights = value * (1 - (xlim-x).abs()) * (1 - (ylim-y).abs()) * (1 - (tlim - t_norm).abs())
+                        else:
+                            interp_weights = value
+
+                        index = H * W * tlim.long() + \
+                                W * ylim.long() + \
+                                xlim.long()
+
+                        voxel_grid.put_(index[mask], interp_weights[mask], accumulate=True)
+
+            if self.normalize:
+                mask = torch.nonzero(voxel_grid, as_tuple=True)
+                if mask[0].size()[0] > 0:
+                    mean = voxel_grid[mask].mean()
+                    std = voxel_grid[mask].std()
+                    if std > 0:
+                        voxel_grid[mask] = (voxel_grid[mask] - mean) / std
+                    else:
+                        voxel_grid[mask] = voxel_grid[mask] - mean
+
+        return voxel_grid
+
+def events_to_voxel_grid(voxel_grid, bin, x, y, p, t, device: str='cpu'):
+    t = (t - t[0]).astype('float32')
+    t = (t/t[-1])
+    x = x.astype('float32')
+    y = y.astype('float32')
+    pol = p.astype('float32') # -1 1
+    return voxel_grid.convert(
+            torch.from_numpy(x),
+            torch.from_numpy(y),
+            torch.from_numpy(pol),
+        torch.from_numpy(t))
+
+def read_voxel_hdf5(file_path,key='event_voxels'):
     with h5py.File(file_path, 'r') as f:
-        voxel_data = f['event_voxels'][:]
+        voxel_data = f[key][:]
     # B, H, W = voxel_data.shape
     # voxel_data = voxel_data.reshape(3, 2, H, W).sum(axis=1)  # New shape: (B//2, H, W)
     return voxel_data
@@ -88,3 +167,226 @@ def crop_event(event_voxel, size, square_ok=False, crop=True, mode='bilinear'):
             event_voxel = resize_event_voxel(event_voxel, target_size, mode=mode)
 
     return event_voxel
+
+def detect_harris_corners_and_gradients(image, patch_size=5, k=0.04, threshold=0.01):
+    """
+    检测Harris角点并计算梯度
+    """
+    # 1. 计算图像梯度
+    Ix = cv2.Sobel(image, cv2.CV_64F, 1, 0, ksize=3)
+    Iy = cv2.Sobel(image, cv2.CV_64F, 0, 1, ksize=3)
+    
+    # 2. 计算梯度乘积
+    Ixx = Ix * Ix
+    Ixy = Iy * Ix
+    Iyy = Iy * Iy
+    
+    # 3. 使用高斯核进行平滑
+    Ixx = gaussian_filter(Ixx, sigma=1)
+    Ixy = gaussian_filter(Ixy, sigma=1)
+    Iyy = gaussian_filter(Iyy, sigma=1)
+    
+    # 4. 计算Harris响应
+    det = (Ixx * Iyy) - (Ixy * Ixy)
+    trace = Ixx + Iyy
+    harris_response = det - k * (trace ** 2)
+    
+    # 5. 非极大值抑制
+    corners = []
+    patches = []
+    gradients = []
+    
+    # 获取局部最大值
+    local_max = cv2.dilate(harris_response, None)
+    corner_mask = (harris_response == local_max) & (harris_response > threshold * harris_response.max())
+    corner_points = np.where(corner_mask)
+    
+    # 6. 提取角点周围的patch和梯度
+    half_patch = patch_size // 2
+    for i in range(len(corner_points[0])):
+        y, x = corner_points[0][i], corner_points[1][i]
+        
+        # 确保patch不超出图像边界
+        if (y >= half_patch and y < image.shape[0] - half_patch and 
+            x >= half_patch and x < image.shape[1] - half_patch):
+            
+            # 提取patch
+            patch = image[y-half_patch:y+half_patch+1, x-half_patch:x+half_patch+1]
+            
+            # 计算该点的梯度
+            grad_x = Ix[y, x].mean()  # 使用mean()来获取标量值
+            grad_y = Iy[y, x].mean()  # 使用mean()来获取标量值
+            
+            corners.append([x, y])
+            patches.append(patch)
+            gradients.append([grad_x, grad_y])
+    
+    return np.array(corners), np.array(patches), np.array(gradients)
+
+def visualize_corners_and_gradients(image, corners, gradients):
+    """
+    可视化角点和梯度
+    """
+    plt.figure(figsize=(12, 4))
+    
+    # 显示原始图像
+    plt.subplot(131)
+    plt.imshow(image, cmap='gray')
+    plt.title('Original Image')
+    
+    # 显示角点
+    plt.subplot(132)
+    plt.imshow(image, cmap='gray')
+    plt.scatter(corners[:, 0], corners[:, 1], c='r', s=20)
+    plt.title('Detected Corners')
+    
+    # 显示梯度
+    plt.subplot(133)
+    plt.imshow(image, cmap='gray')
+    
+    # 确保梯度和角点数量匹配
+    if len(corners) > 0 and len(gradients) > 0:
+        # 归一化梯度以便更好地可视化
+        norm = np.sqrt(gradients[:, 0]**2 + gradients[:, 1]**2)
+        norm[norm == 0] = 1  # 避免除以零
+        normalized_gradients = gradients / norm[:, np.newaxis]
+        
+        # 使用quiver来显示梯度
+        plt.quiver(corners[:, 0], corners[:, 1], 
+                  normalized_gradients[:, 0], normalized_gradients[:, 1],
+                  color='r', scale=50)
+    plt.title('Gradients at Corners')
+    
+    plt.tight_layout()
+    plt.show()
+
+def compute_gradient_flow_dot_product(corners, gradients, ego_flow):
+    """
+    计算每个角点处的梯度和光流的点积，保持梯度信息用于loss计算
+    
+    Args:
+        corners: 角点坐标 [N, 2]
+        gradients: 梯度向量 [N, 2]
+        ego_flow: 光流场 [2, H, W] (CUDA tensor)
+    
+    Returns:
+        dot_products: 点积结果 [N] (保持梯度信息)
+    """
+    dot_products = []
+    
+    for i in range(len(corners)):
+        x, y = corners[i].astype(int)
+        gx, gy = gradients[i]
+        
+        # 获取该点的光流
+        flow_x = ego_flow[0, y, x]  # x方向光流
+        flow_y = ego_flow[1, y, x]  # y方向光流
+        
+        # 计算点积 (保持梯度信息)
+        dot_product = gx * flow_x + gy * flow_y
+        dot_products.append(dot_product)
+    
+    return torch.stack(dot_products)  # 返回tensor而不是numpy数组
+
+def visualize_gradient_flow_dot_product(image, corners, gradients, ego_flow, dot_products, save_dir='visualization'):
+    """
+    可视化梯度和光流的点积结果并保存到本地
+    """
+    # 为了可视化，我们需要分离梯度并转换为numpy
+    image = image.detach().cpu().numpy() if torch.is_tensor(image) else image
+    corners = corners.detach().cpu().numpy() if torch.is_tensor(corners) else corners
+    gradients = gradients.detach().cpu().numpy() if torch.is_tensor(gradients) else gradients
+    ego_flow = ego_flow.detach().cpu().numpy() if torch.is_tensor(ego_flow) else ego_flow
+    dot_products_np = dot_products.detach().cpu().numpy() if torch.is_tensor(dot_products) else dot_products
+    
+    # 创建保存目录
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # 创建图形，调整大小以适应colorbar
+    plt.figure(figsize=(18, 5))
+    
+    # 1. 显示原始图像和角点
+    plt.subplot(131)
+    plt.imshow(image, cmap='gray')
+    plt.scatter(corners[:, 0], corners[:, 1], c='r', s=20)
+    plt.title('Corner Positions')
+    
+    # 2. 显示梯度和光流
+    plt.subplot(132)
+    plt.imshow(image, cmap='gray')
+    # 归一化梯度
+    norm = np.sqrt(gradients[:, 0]**2 + gradients[:, 1]**2)
+    norm[norm == 0] = 1
+    normalized_gradients = gradients / norm[:, np.newaxis]
+    
+    # 绘制梯度
+    plt.quiver(corners[:, 0], corners[:, 1], 
+              normalized_gradients[:, 0], normalized_gradients[:, 1],
+              color='r', scale=50, label='Gradient')
+    
+    # 绘制光流
+    for i in range(len(corners)):
+        x, y = corners[i].astype(int)
+        flow_x = ego_flow[0, y, x]  # x方向光流
+        flow_y = ego_flow[1, y, x]  # y方向光流
+        plt.arrow(x, y, flow_x, flow_y, 
+                 color='b', alpha=0.5, 
+                 head_width=2, head_length=2,
+                 label='Flow' if i==0 else "")
+    
+    plt.title('Gradients and Flow')
+    plt.legend()
+    
+    # 3. 显示点积结果
+    ax = plt.subplot(133)
+    plt.imshow(image, cmap='gray')
+    scatter = plt.scatter(corners[:, 0], corners[:, 1], 
+                         c=dot_products_np, cmap='coolwarm', s=50)
+    plt.title('Gradient-Flow Dot Product')
+    
+    # 添加colorbar，并调整位置
+    cbar = plt.colorbar(scatter, ax=ax, pad=0.1)
+    cbar.set_label('Dot Product')
+    
+    # 调整布局
+    plt.subplots_adjust(wspace=0.3, right=0.95)
+    
+    # 保存图像
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = os.path.join(save_dir, f'gradient_flow_dot_product_{timestamp}.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # 保存点积数据
+    data_save_path = os.path.join(save_dir, f'dot_products_{timestamp}.npy')
+    np.save(data_save_path, {
+        'corners': corners,
+        'gradients': gradients,
+        'dot_products': dot_products_np,
+        'ego_flow': ego_flow
+    })
+    
+    # 打印统计信息
+    print(f"点积范围: [{dot_products_np.min():.2f}, {dot_products_np.max():.2f}]")
+    print(f"平均点积: {dot_products_np.mean():.2f}")
+    print(f"点积标准差: {dot_products_np.std():.2f}")
+    print(f"图像已保存至: {save_path}")
+    print(f"数据已保存至: {data_save_path}")
+
+def normalized_l2_loss(gt, pred, eps=1e-8):
+    """
+    归一化L2距离损失
+    gt: torch.Tensor, shape [N] 或 [B, N]
+    pred: torch.Tensor, shape [N] 或 [B, N]
+    """
+    # 保证为float
+    gt = gt.float()
+    pred = pred.float()
+    
+    # 归一化
+    gt_norm = gt / (torch.norm(gt, p=2, dim=-1, keepdim=True) + eps)
+    pred_norm = pred / (torch.norm(pred, p=2, dim=-1, keepdim=True) + eps)
+    
+    # L2距离的平方
+    loss = torch.sum((gt_norm - pred_norm) ** 2, dim=-1)
+    return loss.mean()  # 如果有batch，取均值；否则就是标量

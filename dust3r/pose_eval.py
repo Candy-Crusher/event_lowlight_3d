@@ -17,15 +17,16 @@ from dust3r.eval_metadata import dataset_metadata
 
 def eval_pose_estimation(args, model, device, save_dir=None):
     metadata = dataset_metadata.get(args.eval_dataset, dataset_metadata['sintel'])
-    img_path = metadata['img_path']
+    all_img_path = metadata['all_img_path']
+    seq_img_path = metadata['seq_img_path']
     mask_path = metadata['mask_path']
 
     ate_mean, rpe_trans_mean, rpe_rot_mean, outfile_list, bug = eval_pose_estimation_dist(
-        args, model, device, save_dir=save_dir, img_path=img_path, mask_path=mask_path
+        args, model, device, all_img_path, seq_img_path, save_dir=save_dir, mask_path=mask_path
     )
     return ate_mean, rpe_trans_mean, rpe_rot_mean, outfile_list, bug
 
-def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask_path=None):
+def eval_pose_estimation_dist(args, model, device, all_img_path, seq_img_path, save_dir=None, mask_path=None):
 
     metadata = dataset_metadata.get(args.eval_dataset, dataset_metadata['sintel'])
     anno_path = metadata.get('anno_path', None)
@@ -38,8 +39,8 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
         else:
             seq_list = metadata.get('seq_list', [])
         if args.full_seq:
-            seq_list = os.listdir(img_path)
-            seq_list = [seq for seq in seq_list if os.path.isdir(os.path.join(img_path, seq))]
+            seq_list = os.listdir(seq_img_path)
+            seq_list = [seq for seq in seq_list if os.path.isdir(os.path.join(seq_img_path, seq))]
         seq_list = sorted(seq_list)
 
     if save_dir is None:
@@ -72,7 +73,7 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
 
     for seq in tqdm(seq_list):
         try:
-            dir_path = metadata['dir_path_func'](img_path, seq)
+            dir_path = metadata['dir_path_func'](seq_img_path, seq)
 
             # Handle skip_condition
             skip_condition = metadata.get('skip_condition', None)
@@ -87,10 +88,14 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
             filelist = filelist[::args.pose_eval_stride]
             event_filelist = None
             if args.use_event_control:
-                event_path = metadata['event_path_func'](img_path, seq)
+                event_path = metadata['event_path_func'](seq_img_path, seq)
                 event_filelist = [os.path.join(event_path, name) for name in os.listdir(event_path)]
                 event_filelist.sort()
                 event_filelist = event_filelist[::args.pose_eval_stride]
+            if args.event_loss_weight > 0:
+                event_stream_all_path = metadata['event_stream_all_path'](all_img_path, seq)
+            else:
+                event_stream_all_path = None
             max_winsize = max(1, math.ceil((len(filelist)-1)/2))
             scene_graph_type = args.scene_graph_type
             if int(scene_graph_type.split('-')[1]) > max_winsize:
@@ -121,6 +126,7 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
                         output, device=device, mode=mode, verbose=not silent,
                         shared_focal=not args.not_shared_focal and not args.use_gt_focal,
                         flow_loss_weight=args.flow_loss_weight, flow_loss_fn=args.flow_loss_fn,
+                        event_loss_weight=args.event_loss_weight,event_stream_all_path=event_stream_all_path,
                         depth_regularize_weight=args.depth_regularize_weight,
                         num_total_iter=args.n_iter, temporal_smoothing_weight=args.temporal_smoothing_weight, motion_mask_thre=args.motion_mask_thre,
                         flow_loss_start_epoch=args.flow_loss_start_epoch, flow_loss_thre=args.flow_loss_thre, translation_weight=args.translation_weight,
@@ -129,7 +135,7 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
                     )
                     if args.use_gt_focal:
                         focal_path = os.path.join(
-                            img_path.replace('final', 'camdata_left'), seq, 'focal.txt'
+                            seq_img_path.replace('final', 'camdata_left'), seq, 'focal.txt'
                         )
                         focals = np.loadtxt(focal_path)
                         focals = focals[::args.pose_eval_stride]
@@ -169,7 +175,7 @@ def eval_pose_estimation_dist(args, model, device, img_path, save_dir=None, mask
             scene.save_rgb_imgs(f'{save_dir}/{seq}')
             enlarge_seg_masks(f'{save_dir}/{seq}', kernel_size=5 if args.use_gt_mask else 3)
 
-            gt_traj_file = metadata['gt_traj_func'](img_path, anno_path, seq)
+            gt_traj_file = metadata['gt_traj_func'](seq_img_path, anno_path, seq)
             traj_format = metadata.get('traj_format', None)
 
             if args.eval_dataset == 'sintel':

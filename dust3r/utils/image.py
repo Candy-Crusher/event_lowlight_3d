@@ -229,6 +229,13 @@ def load_images(folder_or_list, size, square_ok=False, verbose=True, dynamic_mas
     supported_video_extensions = tuple(supported_video_extensions)
 
     # Sort items by their names
+    event_indices_file = folder_content[0].split('/')[:-2] + ['event_windows_indices.txt']
+    event_indices_file = '/'.join(event_indices_file)
+    event_indices = [int(line.split()[0]) for line in open(event_indices_file)]
+
+    imgs_ts_file = folder_content[0].split('/')[:-2] + ['index_It_left.txt']
+    imgs_ts_file = '/'.join(imgs_ts_file)
+    imgs_ts = [float(line.split()[1]) for line in open(imgs_ts_file)]
     folder_content = sorted(folder_content, key=lambda x: x.split('/')[-1])
     for i, path in enumerate(folder_content):
         full_path = os.path.join(root, path)
@@ -244,6 +251,8 @@ def load_images(folder_or_list, size, square_ok=False, verbose=True, dynamic_mas
             
             single_dict = dict(
                 img=ImgNorm(img)[None],
+                event_index=event_indices[i],
+                img_ts=imgs_ts[i],
                 true_shape=np.int32([img.size[::-1]]),
                 idx=len(imgs),
                 instance=full_path,
@@ -252,7 +261,7 @@ def load_images(folder_or_list, size, square_ok=False, verbose=True, dynamic_mas
             # Process event data if available
             if event_filelist is not None:
                 event_path = event_filelist[i]
-                event_voxel = read_voxel_hdf5(event_path)
+                event_voxel = read_voxel_hdf5(event_path,key='event_voxels')
             
                 event_voxel = torch.from_numpy(event_voxel).float()
                 event_voxel = crop_event(event_voxel, size, square_ok=square_ok, crop=crop, mode='bilinear')

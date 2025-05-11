@@ -11,7 +11,10 @@ from dust3r.utils.geometry import xy_grid, geotrf, depthmap_to_pts3d
 from dust3r.utils.device import to_cpu, to_numpy
 from dust3r.utils.goem_opt import DepthBasedWarping, OccMask, WarpImage, depth_regularization_si_weighted, tum_to_pose_matrix
 from third_party.raft import load_RAFT
+from dust3r.utils.event import read_voxel_hdf5, VoxelGrid, events_to_voxel_grid,detect_harris_corners_and_gradients, compute_gradient_flow_dot_product,visualize_gradient_flow_dot_product,normalized_l2_loss
+
 from sam2.build_sam import build_sam2_video_predictor
+
 sam2_checkpoint = "third_party/sam2/checkpoints/sam2.1_hiera_large.pt"
 model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
@@ -33,7 +36,7 @@ class PointCloudOptimizer(BasePCOptimizer):
     Graph edges: observations = (pred1, pred2)
     """
 
-    def __init__(self, *args, optimize_pp=False, focal_break=20, shared_focal=False, flow_loss_fn='smooth_l1', flow_loss_weight=0.0, 
+    def __init__(self, *args, optimize_pp=False, focal_break=20, shared_focal=False, flow_loss_fn='smooth_l1', flow_loss_weight=0.0, event_loss_weight=0.0,event_stream_all_path=None,
                  depth_regularize_weight=0.0, num_total_iter=300, temporal_smoothing_weight=0, translation_weight=0.1, flow_loss_start_epoch=0.15, flow_loss_thre=50,
                  sintel_ckpt=False, use_self_mask=False, pxl_thre=50, sam2_mask_refine=True, motion_mask_thre=0.35, batchify=False,
                  window_wise=False, window_size=100, window_overlap_ratio=0.5, prev_video_results=None, **kwargs):
@@ -133,7 +136,12 @@ class PointCloudOptimizer(BasePCOptimizer):
             self.low_loss_fn = mse_loss_fn
 
         self.flow_loss_weight = flow_loss_weight
+        self.event_loss_weight = event_loss_weight
+        self.event_stream_all_path = event_stream_all_path
         self.depth_regularize_weight = depth_regularize_weight
+        if self.event_loss_weight > 0:
+            self.voxel_grids = [VoxelGrid(channels=1, height=self.imshapes[i][0], width=self.imshapes[i][1], normalize=False, use_weight=False) for i in range(self.n_imgs)]
+            self.event_stream_all = read_voxel_hdf5(event_stream_all_path,key='event_stream')
         if self.flow_loss_weight > 0:
             self.flow_ij, self.flow_ji, self.flow_valid_mask_i, self.flow_valid_mask_j = self.get_flow(sintel_ckpt) # (num_pairs, 2, H, W)
             if use_self_mask: self.get_motion_mask_from_pairs(*args)
@@ -290,6 +298,18 @@ class PointCloudOptimizer(BasePCOptimizer):
         # delete the flow net
         if flow_net is not None: del flow_net
         return flow_ij, flow_ji, valid_mask_i, valid_mask_j
+    
+    def get_event(self, start_idx, end_idx, voxel_grid, time_interval=100):
+        # start_ts = self.event_stream_all[start_idx, 2]
+        # end_ts = start_ts + time_interval/100   # time_interval is in ms
+        # end_idx = np.searchsorted(self.event_stream_all[:, 2], end_ts, side='right')
+        event_stream = self.event_stream_all[start_idx:end_idx]
+        event_x = event_stream[:, 0]
+        event_y = event_stream[:, 1]
+        event_t = event_stream[:, 2]
+        event_p = event_stream[:, 3]
+        event_representation = events_to_voxel_grid(voxel_grid, bin=1, x=event_x, y=event_y, p=event_p, t=event_t)
+        return event_representation
 
     def get_motion_mask_from_pairs(self, view1, view2, pred1, pred2):
         assert self.is_symmetrized, 'only support symmetric case'
@@ -345,8 +365,8 @@ class PointCloudOptimizer(BasePCOptimizer):
         self.depth_maps_i = torch.stack(depth_maps_i).unsqueeze(1).to(self.flow_ij.device)
         self.depth_maps_j = torch.stack(depth_maps_j).unsqueeze(1).to(self.flow_ij.device)
 
-        ego_flow_1_2, _ = self.depth_wrapper(self.R_i, self.T_i, self.R_j, self.T_j, 1 / (self.depth_maps_i + 1e-6), self.intrinsics_j, torch.linalg.inv(self.intrinsics_i))
-        ego_flow_2_1, _ = self.depth_wrapper(self.R_j, self.T_j, self.R_i, self.T_i, 1 / (self.depth_maps_j + 1e-6), self.intrinsics_i, torch.linalg.inv(self.intrinsics_j))
+        ego_flow_1_2, _, _ = self.depth_wrapper(self.R_i, self.T_i, self.R_j, self.T_j, 1 / (self.depth_maps_i + 1e-6), self.intrinsics_j, torch.linalg.inv(self.intrinsics_i))
+        ego_flow_2_1, _, _ = self.depth_wrapper(self.R_j, self.T_j, self.R_i, self.T_i, 1 / (self.depth_maps_j + 1e-6), self.intrinsics_i, torch.linalg.inv(self.intrinsics_j))
 
         err_map_i = torch.norm(ego_flow_1_2[:, :2, ...] - self.flow_ij[:len(symmetry_pairs_idx)], dim=1)
         err_map_j = torch.norm(ego_flow_2_1[:, :2, ...] - self.flow_ji[:len(symmetry_pairs_idx)], dim=1)
@@ -788,8 +808,8 @@ class PointCloudOptimizer(BasePCOptimizer):
             depth_all = torch.stack(self.get_depthmaps(raw=False)).unsqueeze(1)
             depth1, depth2 = depth_all[self._ei], depth_all[self._ej]
             disp_1, disp_2 = 1 / (depth1 + 1e-6), 1 / (depth2 + 1e-6)
-            ego_flow_1_2, _ = self.depth_wrapper(R1, T1, R2, T2, disp_1, K_2, inv_K_1)
-            ego_flow_2_1, _ = self.depth_wrapper(R2, T2, R1, T1, disp_2, K_1, inv_K_2)
+            ego_flow_1_2, _, _ = self.depth_wrapper(R1, T1, R2, T2, disp_1, K_2, inv_K_1)
+            ego_flow_2_1, _, _ = self.depth_wrapper(R2, T2, R1, T1, disp_2, K_1, inv_K_2)
             dynamic_masks_all = torch.stack(self.dynamic_masks).to(self.device).unsqueeze(1)
             dynamic_mask1, dynamic_mask2 = dynamic_masks_all[self._ei], dynamic_masks_all[self._ej]
 
@@ -847,8 +867,8 @@ class PointCloudOptimizer(BasePCOptimizer):
             depth_all = torch.stack(self.get_win_depthmaps(raw=False)).unsqueeze(1)
             depth1, depth2 = depth_all[self._win_ei], depth_all[self._win_ej]
             disp_1, disp_2 = 1 / (depth1 + 1e-6), 1 / (depth2 + 1e-6)
-            ego_flow_1_2, _ = self.depth_wrapper(R1, T1, R2, T2, disp_1, K_2, inv_K_1)
-            ego_flow_2_1, _ = self.depth_wrapper(R2, T2, R1, T1, disp_2, K_1, inv_K_2)
+            ego_flow_1_2, _, _ = self.depth_wrapper(R1, T1, R2, T2, disp_1, K_2, inv_K_1)
+            ego_flow_2_1, _, _ = self.depth_wrapper(R2, T2, R1, T1, disp_2, K_1, inv_K_2)
             dynamic_masks_all = torch.stack(self.win_dynamic_masks).to(self.device).unsqueeze(1)
             dynamic_mask1, dynamic_mask2 = dynamic_masks_all[self._win_ei], dynamic_masks_all[self._win_ej]
 
@@ -943,9 +963,44 @@ class PointCloudOptimizer(BasePCOptimizer):
 
                 # Compute "ego-motion flow" by projecting using DepthBasedWarping
                 # Note that DepthBasedWarping expects batch dimension, so add unsqueeze(0)
-                # TODO: 需要修改 event loss
-                ego_flow_1_2, _ = self.depth_wrapper(R1, T1, R2, T2, disp_1, K2, inv_K1)
-                ego_flow_2_1, _ = self.depth_wrapper(R2, T2, R1, T1, disp_2, K1, inv_K2)
+                ego_flow_1_2, tgt_coord_1_2, src_coord_2 = self.depth_wrapper(R1, T1, R2, T2, disp_1, K2, inv_K1)
+                ego_flow_2_1, tgt_coord_2_1, src_coord_1 = self.depth_wrapper(R2, T2, R1, T1, disp_2, K1, inv_K2)
+
+                            # event loss
+                if self.event_loss_weight > 0:
+                    if self.event_indices[i]< self.event_indices[j]:
+                        first_id = i
+                        second_id = j
+                        ego_flow = ego_flow_1_2[0, :2, ...]
+                    else:
+                        first_id = j
+                        second_id = i
+                        ego_flow = ego_flow_2_1[0, :2, ...]
+                    event_repr = self.get_event(self.event_indices[first_id], self.event_indices[second_id], self.voxel_grids[first_id])
+                                        # (intensity gradient of image) dot product flow should be similar to the event_repr_i
+                    corners, patches, gradients = detect_harris_corners_and_gradients(
+                        self.imgs[first_id],
+                        patch_size=5,  # 角点周围的patch大小
+                        k=0.04,        # Harris角点检测的敏感度参数
+                        threshold=0.01 # 角点响应阈值
+                    )
+
+                    # 计算点积
+                    dot_products = compute_gradient_flow_dot_product(corners, gradients, ego_flow)  # shape: (N_corner,)
+                    x = corners[:, 0].astype(int)
+                    y = corners[:, 1].astype(int)
+                    event_repr_at_corners = event_repr[0, y, x].to(dot_products.device)  # [N]
+                    # 可视化结果并保存
+
+                    # visualize_gradient_flow_dot_product(
+                    #     self.imgs[first_id], 
+                    #     corners, 
+                    #     gradients, 
+                    #     ego_flow, 
+                    #     dot_products,
+                    # save_dir='visualization/gradient_flow'
+                    # )
+                    event_loss = normalized_l2_loss(event_repr_at_corners, dot_products)
 
                 # Get the corresponding dynamic region masks (if any)
                 dynamic_mask_i = self.dynamic_masks[i]  # shape: (H, W)
@@ -970,10 +1025,15 @@ class PointCloudOptimizer(BasePCOptimizer):
             # divide by the number of edges
             flow_loss /= self.n_edges
             print(f'flow loss: {flow_loss.item()}')
+            if self.event_loss_weight > 0:
+                event_loss /= self.n_edges
+                print(f'event loss: {event_loss.item()}')
             if flow_loss.item() > self.flow_loss_thre and self.flow_loss_thre > 0:
                 flow_loss = 0.0
 
             loss += self.flow_loss_weight * flow_loss
+            if self.event_loss_weight > 0:
+                loss += self.event_loss_weight * event_loss
 
         # --(4) Add depth regularization (depth_prior_loss) to constrain the initial depth--
         if self.depth_regularize_weight > 0:
@@ -1009,6 +1069,8 @@ class PointCloudOptimizer(BasePCOptimizer):
         self.im_conf = self.im_conf[self.n_prev_frames:]
         self.init_conf_maps = self.init_conf_maps[self.n_prev_frames:]
         self.imgs = self.imgs[self.n_prev_frames:]
+        self.imgs_ts = self.imgs_ts[self.n_prev_frames:]
+        self.event_indices = self.event_indices[self.n_prev_frames:]
         self.dynamic_masks = self.dynamic_masks[self.n_prev_frames:]
         if getattr(self, 'sam2_dynamic_masks', None) is not None:
             self.sam2_dynamic_masks = self.sam2_dynamic_masks[self.n_prev_frames:]

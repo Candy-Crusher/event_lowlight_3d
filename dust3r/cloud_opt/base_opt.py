@@ -118,13 +118,20 @@ class BasePCOptimizer (nn.Module):
         self.imgs = None
         if 'img' in view1 and 'img' in view2:
             imgs = [torch.zeros((3,)+hw) for hw in self.imshapes]
+            imgs_ts = [0 for _ in range(self.n_imgs)]
+            event_indices = [0 for _ in range(self.n_imgs)]
             for v in range(len(self.edges)):
                 idx = view1['idx'][v]
                 imgs[idx] = view1['img'][v]
+                imgs_ts[idx] = view1['img_ts'][v]
+                event_indices[idx] = view1['event_index'][v]
                 idx = view2['idx'][v]
                 imgs[idx] = view2['img'][v]
+                imgs_ts[idx] = view2['img_ts'][v]
+                event_indices[idx] = view2['event_index'][v]
             self.imgs = rgb(imgs)
-
+            self.imgs_ts = imgs_ts
+            self.event_indices = event_indices
         self.dynamic_masks = None
         if 'dynamic_mask' in view1 and 'dynamic_mask' in view2:
             dynamic_masks = [torch.zeros(hw) for hw in self.imshapes]

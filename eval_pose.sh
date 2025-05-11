@@ -9,7 +9,7 @@ CUDA_VISIBLE_DEVICES=3 torchrun --nproc_per_node=1 --master_port=29611 launch.py
     --pretrained="checkpoints/MonST3R_PO-TA-S-W_ViTLarge_BaseDecoder_512_dpt.pth"   \
     --eval_dataset=mvsec --output_dir="/mnt/sdc/xswu/3d/code/results/$experiment_name" \
     --seq_list="outdoor_night/outdoor_night1" \
-    --use_event_control \
+    --event_loss_weight=0.01 \
     # --use_gt_focal \
     # --seq_list="indoor_flying/indoor_flying3" \
     # --seq_list="outdoor_day/outdoor_day2" \
