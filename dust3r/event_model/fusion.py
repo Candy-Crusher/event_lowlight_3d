@@ -239,3 +239,112 @@ class EventImageFusion(nn.Module):
             'attention_weights_mean': self.attention_weights.mean().item() if self.attention_weights is not None else 0
         }
         return stats
+
+class FeatureFusionLayer(nn.Module):
+    """特征融合层，支持多种融合策略"""
+    
+    def __init__(self, dim, fusion_type='attention', num_heads=8):
+        super().__init__()
+        self.dim = dim
+        self.fusion_type = fusion_type
+        
+        if fusion_type == 'attention':
+            # 注意力融合
+            self.attention = CrossAttention(
+                dim_q=dim,
+                dim_kv=dim,
+                dim_embed=dim,
+                dim_out=dim,
+                num_heads=num_heads
+            )
+            self.norm1 = nn.LayerNorm(dim)
+            self.norm2 = nn.LayerNorm(dim)
+            
+        elif fusion_type == 'concat':
+            # 拼接融合
+            self.fusion_conv = nn.Sequential(
+                nn.Linear(dim * 2, dim),
+                nn.LayerNorm(dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(dim, dim)
+            )
+            
+        elif fusion_type == 'adaptive':
+            # 自适应融合
+            self.fusion_weights = nn.Sequential(
+                nn.Linear(dim * 2, dim),
+                nn.LayerNorm(dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(dim, 2),
+                nn.Softmax(dim=-1)
+            )
+            
+        # 特征增强
+        self.enhance = nn.Sequential(
+            nn.Linear(dim, dim * 2),
+            nn.LayerNorm(dim * 2),
+            nn.ReLU(inplace=True),
+            nn.Linear(dim * 2, dim),
+            nn.LayerNorm(dim)
+        )
+        
+        self._init_weights()
+        
+    def _init_weights(self):
+        def _init_module(module):
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+        
+        self.apply(_init_module)
+        
+    def forward(self, x1, x2, snr_map=None):
+        """
+        融合两个特征
+        
+        Args:
+            x1: 第一个特征 [B, L, C]
+            x2: 第二个特征 [B, L, C]
+            snr_map: SNR map [B, L, 1] 或 None
+            
+        Returns:
+            融合后的特征 [B, L, C]
+        """
+        if self.fusion_type == 'attention':
+            # 注意力融合
+            x1 = self.norm1(x1)
+            x2 = self.norm2(x2)
+            
+            # 计算注意力
+            attn_output = self.attention(query=x1, key=x2, value=x2)
+            
+            # 残差连接
+            fused = x1 + attn_output
+            
+        elif self.fusion_type == 'concat':
+            # 拼接融合
+            concat_feat = torch.cat([x1, x2], dim=-1)
+            fused = self.fusion_conv(concat_feat)
+            
+        elif self.fusion_type == 'adaptive':
+            # 自适应融合
+            concat_feat = torch.cat([x1, x2], dim=-1)
+            weights = self.fusion_weights(concat_feat)  # [B, L, 2]
+            fused = weights[:, :, 0:1] * x1 + weights[:, :, 1:2] * x2
+            
+        # 如果提供了SNR map，使用它来调整融合权重
+        if snr_map is not None:
+            snr_weight = torch.sigmoid(snr_map)
+            fused = fused * snr_weight + x1 * (1 - snr_weight)
+            
+        # 特征增强
+        enhanced = self.enhance(fused)
+        
+        # 残差连接
+        output = fused + enhanced
+        
+        return output

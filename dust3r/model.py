@@ -19,7 +19,7 @@ from third_party.raft import load_RAFT
 import dust3r.utils.path_to_croco  # noqa: F401
 from models.croco import CroCoNet  # noqa
 from .event_model import create_model
-from .event_model.fusion import ImageEventFusion, check_shape_consistency
+from .event_model.fusion import ImageEventFusion, check_shape_consistency, FeatureFusionLayer
 from .event_model.lightup_net import EvLightEnhancer
 from .visualization import visualize_image_snr, visualize_feature
 
@@ -165,6 +165,10 @@ class AsymmetricCroCo3DStereo (
         
         # 特征归一化层
         self.norm = nn.LayerNorm(1024)
+
+        self.fusion_layer = FeatureFusionLayer(
+            dim=1024, fusion_type='concat', num_heads=8
+        )
         
         # 初始化权重
         nn.init.kaiming_normal_(self.linear_adjust.weight, mode='fan_out', nonlinearity='relu')
@@ -342,7 +346,12 @@ class AsymmetricCroCo3DStereo (
                 
                 # 结合SNR权重和注意力权重进行融合
                 fusion_weight = snr_map * attention_weights
-                x = x * fusion_weight + event_feat * (1 - fusion_weight)
+                event_feat = event_feat * (1 - fusion_weight)
+                x = x * fusion_weight
+                # concate
+                x = self.fusion_layer(x, event_feat)
+                # proj to the correct dimension
+
             else:
                 # 如果没有SNR map，仅使用注意力权重
                 x = x * attention_weights + event_feat * (1 - attention_weights)
