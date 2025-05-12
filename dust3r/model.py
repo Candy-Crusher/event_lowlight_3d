@@ -346,8 +346,8 @@ class AsymmetricCroCo3DStereo (
                 
                 # 结合SNR权重和注意力权重进行融合
                 fusion_weight = snr_map * attention_weights
-                event_feat = event_feat * (1 - fusion_weight)
-                x = x * fusion_weight
+                # event_feat = event_feat * (1 - fusion_weight)
+                # x = x * fusion_weight
                 # concate
                 x = self.fusion_layer(x, event_feat)
                 # proj to the correct dimension
