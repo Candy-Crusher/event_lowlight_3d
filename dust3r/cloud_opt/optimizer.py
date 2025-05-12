@@ -11,7 +11,7 @@ from dust3r.utils.geometry import xy_grid, geotrf, depthmap_to_pts3d
 from dust3r.utils.device import to_cpu, to_numpy
 from dust3r.utils.goem_opt import DepthBasedWarping, OccMask, WarpImage, depth_regularization_si_weighted, tum_to_pose_matrix
 from third_party.raft import load_RAFT
-from dust3r.utils.event import read_voxel_hdf5, VoxelGrid, events_to_voxel_grid,detect_harris_corners_and_gradients, compute_gradient_flow_dot_product,visualize_gradient_flow_dot_product,normalized_l2_loss
+from dust3r.utils.event import read_voxel_hdf5, VoxelGrid, events_to_voxel_grid,detect_harris_corners_and_gradients, compute_gradient_flow_dot_product,visualize_gradient_flow_dot_product,normalized_l2_loss,visualize_flow
 
 from sam2.build_sam import build_sam2_video_predictor
 
@@ -808,8 +808,8 @@ class PointCloudOptimizer(BasePCOptimizer):
             depth_all = torch.stack(self.get_depthmaps(raw=False)).unsqueeze(1)
             depth1, depth2 = depth_all[self._ei], depth_all[self._ej]
             disp_1, disp_2 = 1 / (depth1 + 1e-6), 1 / (depth2 + 1e-6)
-            ego_flow_1_2, _, _ = self.depth_wrapper(R1, T1, R2, T2, disp_1, K_2, inv_K_1)
-            ego_flow_2_1, _, _ = self.depth_wrapper(R2, T2, R1, T1, disp_2, K_1, inv_K_2)
+            ego_flow_1_2, _, _ = self.depth_wrapper(R1, T1, R2, T2, disp_1, K2, inv_K1)
+            ego_flow_2_1, _, _ = self.depth_wrapper(R2, T2, R1, T1, disp_2, K1, inv_K2)
             dynamic_masks_all = torch.stack(self.dynamic_masks).to(self.device).unsqueeze(1)
             dynamic_mask1, dynamic_mask2 = dynamic_masks_all[self._ei], dynamic_masks_all[self._ej]
 
@@ -867,8 +867,8 @@ class PointCloudOptimizer(BasePCOptimizer):
             depth_all = torch.stack(self.get_win_depthmaps(raw=False)).unsqueeze(1)
             depth1, depth2 = depth_all[self._win_ei], depth_all[self._win_ej]
             disp_1, disp_2 = 1 / (depth1 + 1e-6), 1 / (depth2 + 1e-6)
-            ego_flow_1_2, _, _ = self.depth_wrapper(R1, T1, R2, T2, disp_1, K_2, inv_K_1)
-            ego_flow_2_1, _, _ = self.depth_wrapper(R2, T2, R1, T1, disp_2, K_1, inv_K_2)
+            ego_flow_1_2, _, _ = self.depth_wrapper(R1, T1, R2, T2, disp_1, K2, inv_K1)
+            ego_flow_2_1, _, _ = self.depth_wrapper(R2, T2, R1, T1, disp_2, K1, inv_K2)
             dynamic_masks_all = torch.stack(self.win_dynamic_masks).to(self.device).unsqueeze(1)
             dynamic_mask1, dynamic_mask2 = dynamic_masks_all[self._win_ei], dynamic_masks_all[self._win_ej]
 
@@ -972,10 +972,12 @@ class PointCloudOptimizer(BasePCOptimizer):
                         first_id = i
                         second_id = j
                         ego_flow = ego_flow_1_2[0, :2, ...]
+                        raft_flow = self.flow_ij[e]
                     else:
                         first_id = j
                         second_id = i
                         ego_flow = ego_flow_2_1[0, :2, ...]
+                        raft_flow = self.flow_ji[e]
                     event_repr = self.get_event(self.event_indices[first_id], self.event_indices[second_id], self.voxel_grids[first_id])
                                         # (intensity gradient of image) dot product flow should be similar to the event_repr_i
                     corners, patches, gradients = detect_harris_corners_and_gradients(
@@ -990,16 +992,27 @@ class PointCloudOptimizer(BasePCOptimizer):
                     x = corners[:, 0].astype(int)
                     y = corners[:, 1].astype(int)
                     event_repr_at_corners = event_repr[0, y, x].to(dot_products.device)  # [N]
-                    # 可视化结果并保存
-
+                    patch_flow = raft_flow[:, y, x].to(dot_products.device)
+                    
+                    # # 可视化RAFT光流
+                    # visualize_flow(
+                    #     raft_flow,
+                    #     self.imgs[first_id],
+                    #     save_dir='visualization/raft_flow'
+                    # )
+                    
+                    # # 可视化梯度和光流点积
                     # visualize_gradient_flow_dot_product(
                     #     self.imgs[first_id], 
                     #     corners, 
                     #     gradients, 
                     #     ego_flow, 
+                    #     patch_flow,
                     #     dot_products,
-                    # save_dir='visualization/gradient_flow'
+                    #     event_repr_at_corners,
+                    #     save_dir='visualization/gradient_flow'
                     # )
+                    # exit(0)
                     event_loss = normalized_l2_loss(event_repr_at_corners, dot_products)
 
                 # Get the corresponding dynamic region masks (if any)
@@ -1031,7 +1044,7 @@ class PointCloudOptimizer(BasePCOptimizer):
             if flow_loss.item() > self.flow_loss_thre and self.flow_loss_thre > 0:
                 flow_loss = 0.0
 
-            loss += self.flow_loss_weight * flow_loss
+            # loss += self.flow_loss_weight * flow_loss
             if self.event_loss_weight > 0:
                 loss += self.event_loss_weight * event_loss
 

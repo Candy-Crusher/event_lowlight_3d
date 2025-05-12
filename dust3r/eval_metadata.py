@@ -6,7 +6,7 @@ from tqdm import tqdm
 dataset_metadata = {
     'mvsec': {
         'all_img_path': "data/MVSEC/processed_rect_odem",
-        'seq_img_path': "data/MVSEC/monst3r_test_rect_odem/l10",
+        'seq_img_path': "data/MVSEC/monst3r_test_rect_odem/l40",
         'mask_path': None,
         # 'dir_path_func': lambda img_path, seq: os.path.join(img_path, seq, "image_left"),
         'dir_path_func': lambda seq_img_path, seq: os.path.join(seq_img_path, seq, "seq63/image_left_interpolated"),

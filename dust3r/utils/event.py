@@ -288,39 +288,61 @@ def compute_gradient_flow_dot_product(corners, gradients, ego_flow):
     
     return torch.stack(dot_products)  # 返回tensor而不是numpy数组
 
-def visualize_gradient_flow_dot_product(image, corners, gradients, ego_flow, dot_products, save_dir='visualization'):
+def visualize_gradient_flow_dot_product(image, corners, gradients, ego_flow, patch_flow, dot_products, event_repr_at_corners=None, save_dir='visualization'):
     """
     可视化梯度和光流的点积结果并保存到本地
+    
+    Args:
+        image: 输入图像
+        corners: 角点坐标 [N, 2]
+        gradients: 梯度向量 [N, 2]
+        ego_flow: 光流场 [2, H, W]
+        patch_flow: 角点处的光流 [2, N]
+        dot_products: 点积结果 [N]
+        event_repr_at_corners: 角点处的事件表示 [N]，可选
+        save_dir: 保存目录
     """
     # 为了可视化，我们需要分离梯度并转换为numpy
     image = image.detach().cpu().numpy() if torch.is_tensor(image) else image
     corners = corners.detach().cpu().numpy() if torch.is_tensor(corners) else corners
     gradients = gradients.detach().cpu().numpy() if torch.is_tensor(gradients) else gradients
     ego_flow = ego_flow.detach().cpu().numpy() if torch.is_tensor(ego_flow) else ego_flow
+    patch_flow = patch_flow.detach().cpu().numpy() if torch.is_tensor(patch_flow) else patch_flow
     dot_products_np = dot_products.detach().cpu().numpy() if torch.is_tensor(dot_products) else dot_products
+    if event_repr_at_corners is not None:
+        event_repr_np = event_repr_at_corners.detach().cpu().numpy() if torch.is_tensor(event_repr_at_corners) else event_repr_at_corners
+    
+    # 确保patch_flow的维度正确 [2, N] -> [N, 2]
+    if patch_flow.shape[0] == 2:
+        patch_flow = patch_flow.T
     
     # 创建保存目录
     os.makedirs(save_dir, exist_ok=True)
     
-    # 创建图形，调整大小以适应colorbar
-    plt.figure(figsize=(18, 5))
+    # 创建图形和GridSpec
+    if event_repr_at_corners is not None:
+        fig = plt.figure(figsize=(30, 5))
+        gs = fig.add_gridspec(1, 5)
+    else:
+        fig = plt.figure(figsize=(24, 5))
+        gs = fig.add_gridspec(1, 4)
     
     # 1. 显示原始图像和角点
-    plt.subplot(131)
-    plt.imshow(image, cmap='gray')
-    plt.scatter(corners[:, 0], corners[:, 1], c='r', s=20)
-    plt.title('Corner Positions')
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax1.imshow(image, cmap='gray')
+    ax1.scatter(corners[:, 0], corners[:, 1], c='r', s=20)
+    ax1.set_title('Corner Positions')
     
     # 2. 显示梯度和光流
-    plt.subplot(132)
-    plt.imshow(image, cmap='gray')
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax2.imshow(image, cmap='gray')
     # 归一化梯度
     norm = np.sqrt(gradients[:, 0]**2 + gradients[:, 1]**2)
     norm[norm == 0] = 1
     normalized_gradients = gradients / norm[:, np.newaxis]
     
     # 绘制梯度
-    plt.quiver(corners[:, 0], corners[:, 1], 
+    ax2.quiver(corners[:, 0], corners[:, 1], 
               normalized_gradients[:, 0], normalized_gradients[:, 1],
               color='r', scale=50, label='Gradient')
     
@@ -329,24 +351,50 @@ def visualize_gradient_flow_dot_product(image, corners, gradients, ego_flow, dot
         x, y = corners[i].astype(int)
         flow_x = ego_flow[0, y, x]  # x方向光流
         flow_y = ego_flow[1, y, x]  # y方向光流
-        plt.arrow(x, y, flow_x, flow_y, 
+        ax2.arrow(x, y, flow_x, flow_y, 
                  color='b', alpha=0.5, 
                  head_width=2, head_length=2,
                  label='Flow' if i==0 else "")
     
-    plt.title('Gradients and Flow')
-    plt.legend()
+    ax2.set_title('Gradients and Flow')
+    ax2.legend()
     
     # 3. 显示点积结果
-    ax = plt.subplot(133)
-    plt.imshow(image, cmap='gray')
-    scatter = plt.scatter(corners[:, 0], corners[:, 1], 
+    ax3 = fig.add_subplot(gs[0, 2])
+    ax3.imshow(image, cmap='gray')
+    scatter = ax3.scatter(corners[:, 0], corners[:, 1], 
                          c=dot_products_np, cmap='coolwarm', s=50)
-    plt.title('Gradient-Flow Dot Product')
+    ax3.set_title('Gradient-Flow Dot Product')
     
     # 添加colorbar，并调整位置
-    cbar = plt.colorbar(scatter, ax=ax, pad=0.1)
+    cbar = plt.colorbar(scatter, ax=ax3, pad=0.1)
     cbar.set_label('Dot Product')
+    
+    # 4. 显示patch flow
+    ax4 = fig.add_subplot(gs[0, 3])
+    ax4.imshow(image, cmap='gray')
+    # 归一化patch flow
+    norm = np.sqrt(patch_flow[:, 0]**2 + patch_flow[:, 1]**2)
+    norm[norm == 0] = 1
+    normalized_patch_flow = patch_flow / norm[:, np.newaxis]
+    
+    # 绘制patch flow
+    ax4.quiver(corners[:, 0], corners[:, 1], 
+              normalized_patch_flow[:, 0], normalized_patch_flow[:, 1],
+              color='g', scale=50)
+    ax4.set_title('Patch Flow')
+    
+    # 5. 如果提供了事件表示，显示事件表示
+    if event_repr_at_corners is not None:
+        ax5 = fig.add_subplot(gs[0, 4])
+        ax5.imshow(image, cmap='gray')
+        scatter = ax5.scatter(corners[:, 0], corners[:, 1], 
+                            c=event_repr_np, cmap='coolwarm', s=50)
+        ax5.set_title('Event Representation')
+        
+        # 添加colorbar，并调整位置
+        cbar = plt.colorbar(scatter, ax=ax5, pad=0.1)
+        cbar.set_label('Event Value')
     
     # 调整布局
     plt.subplots_adjust(wspace=0.3, right=0.95)
@@ -359,17 +407,25 @@ def visualize_gradient_flow_dot_product(image, corners, gradients, ego_flow, dot
     
     # 保存点积数据
     data_save_path = os.path.join(save_dir, f'dot_products_{timestamp}.npy')
-    np.save(data_save_path, {
+    save_dict = {
         'corners': corners,
         'gradients': gradients,
         'dot_products': dot_products_np,
-        'ego_flow': ego_flow
-    })
+        'ego_flow': ego_flow,
+        'patch_flow': patch_flow
+    }
+    if event_repr_at_corners is not None:
+        save_dict['event_repr'] = event_repr_np
+    np.save(data_save_path, save_dict)
     
     # 打印统计信息
     print(f"点积范围: [{dot_products_np.min():.2f}, {dot_products_np.max():.2f}]")
     print(f"平均点积: {dot_products_np.mean():.2f}")
     print(f"点积标准差: {dot_products_np.std():.2f}")
+    if event_repr_at_corners is not None:
+        print(f"事件表示范围: [{event_repr_np.min():.2f}, {event_repr_np.max():.2f}]")
+        print(f"平均事件表示: {event_repr_np.mean():.2f}")
+        print(f"事件表示标准差: {event_repr_np.std():.2f}")
     print(f"图像已保存至: {save_path}")
     print(f"数据已保存至: {data_save_path}")
 
@@ -390,3 +446,106 @@ def normalized_l2_loss(gt, pred, eps=1e-8):
     # L2距离的平方
     loss = torch.sum((gt_norm - pred_norm) ** 2, dim=-1)
     return loss.mean()  # 如果有batch，取均值；否则就是标量
+
+def visualize_flow(flow, image=None, save_dir='visualization', title='Flow Visualization'):
+    """
+    可视化光流场
+    
+    Args:
+        flow: 光流场 [2, H, W]
+        image: 原始图像，可选
+        save_dir: 保存目录
+        title: 图像标题
+    """
+    # 转换为numpy数组
+    flow = flow.detach().cpu().numpy() if torch.is_tensor(flow) else flow
+    if image is not None:
+        image = image.detach().cpu().numpy() if torch.is_tensor(image) else image
+    
+    # 创建保存目录
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # 创建图形和子图
+    fig = plt.figure(figsize=(20, 5))
+    if image is not None:
+        ax1 = fig.add_subplot(131)
+        ax2 = fig.add_subplot(132)
+        ax3 = fig.add_subplot(133)
+    else:
+        ax2 = fig.add_subplot(121)
+        ax3 = fig.add_subplot(122)
+    
+    # 1. 显示原始图像（如果有）
+    if image is not None:
+        ax1.imshow(image, cmap='gray')
+        ax1.set_title('Original Image')
+    
+    # 2. 显示光流场（箭头表示）
+    if image is not None:
+        ax2.imshow(image, cmap='gray')
+    
+    # 创建网格点
+    h, w = flow.shape[1:]
+    y, x = np.mgrid[0:h:20, 0:w:20]  # 每20个像素采样一个点
+    
+    # 获取采样点的光流值
+    flow_x = flow[0, y.flatten(), x.flatten()]  # 展平坐标
+    flow_y = flow[1, y.flatten(), x.flatten()]
+    
+    # 计算光流幅值用于颜色映射
+    magnitude = np.sqrt(flow_x**2 + flow_y**2)
+    
+    # 绘制光流场
+    quiver = ax2.quiver(x.flatten(), y.flatten(), flow_x, flow_y, magnitude,
+              cmap='viridis', scale=50,
+              width=0.003, headwidth=3)
+    
+    # 添加colorbar
+    cbar = fig.colorbar(quiver, ax=ax2, pad=0.1)
+    cbar.set_label('Flow Magnitude')
+    ax2.set_title('Flow Field (Arrows)')
+    
+    # 3. 显示光流场（颜色映射）
+    # 计算光流的幅值和方向
+    magnitude = np.sqrt(flow[0]**2 + flow[1]**2)
+    angle = np.arctan2(flow[1], flow[0])
+    
+    # 将角度归一化到[0, 1]范围
+    angle = (angle + np.pi) / (2 * np.pi)
+    
+    # 创建HSV颜色映射
+    hsv = np.zeros((h, w, 3))
+    hsv[..., 0] = angle  # 色调：表示方向
+    hsv[..., 1] = 1.0    # 饱和度：设为最大
+    hsv[..., 2] = np.clip(magnitude / magnitude.max(), 0, 1)  # 亮度：表示幅值
+    
+    # 转换为RGB
+    rgb = plt.cm.hsv(hsv[..., 0])
+    rgb[..., 3] = hsv[..., 2]  # 使用alpha通道来表示幅值
+    
+    # 显示颜色映射的光流场
+    ax3.imshow(rgb)
+    ax3.set_title('Flow Field (Color Map)')
+    
+    # 添加方向图例
+    legend_elements = [
+        plt.Line2D([0], [0], color='red', label='Right'),
+        plt.Line2D([0], [0], color='green', label='Up'),
+        plt.Line2D([0], [0], color='blue', label='Left'),
+        plt.Line2D([0], [0], color='yellow', label='Down')
+    ]
+    ax3.legend(handles=legend_elements, loc='upper right')
+    
+    # 调整布局
+    plt.subplots_adjust(wspace=0.3, right=0.95)
+    
+    # 保存图像
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = os.path.join(save_dir, f'flow_visualization_{timestamp}.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"光流可视化已保存至: {save_path}")
+    print(f"光流幅值范围: [{magnitude.min():.2f}, {magnitude.max():.2f}]")
+    print(f"平均光流幅值: {magnitude.mean():.2f}")
+    print(f"光流幅值标准差: {magnitude.std():.2f}")
