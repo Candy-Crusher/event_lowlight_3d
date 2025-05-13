@@ -11,7 +11,7 @@ root_dir="/mnt/sdc/xswu/3d/code/results"
 # experiment_name="MonST3R_PO-TA-S-baseline_rect_inpainted"
 # experiment_name="MonST3R_PO-TA-S-baseline_rect_interpolated"
 # experiment_name="ours_finetune_wE"
-experiment_name="ours_finetune_wE_cat"
+experiment_name="ours_finetune_wE_cat_woSnrCat"
     # --pretrained="checkpoints/MonST3R_PO-TA-S-W_ViTLarge_BaseDecoder_512_dpt.pth"   \
     # --pretrained="$root_dir/$experiment_name/checkpoint-best.pth"   \
 CUDA_VISIBLE_DEVICES=3 torchrun --nproc_per_node=1 --master_port=29617 launch.py --mode=eval_depth  \

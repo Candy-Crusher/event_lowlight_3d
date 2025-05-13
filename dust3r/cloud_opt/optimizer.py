@@ -1044,7 +1044,7 @@ class PointCloudOptimizer(BasePCOptimizer):
             if flow_loss.item() > self.flow_loss_thre and self.flow_loss_thre > 0:
                 flow_loss = 0.0
 
-            # loss += self.flow_loss_weight * flow_loss
+            loss += self.flow_loss_weight * flow_loss   # if use flow loss
             if self.event_loss_weight > 0:
                 loss += self.event_loss_weight * event_loss
 

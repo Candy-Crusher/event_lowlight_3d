@@ -21,7 +21,7 @@ dataset_metadata = {
         'full_seq': False,
         'mask_path_seq_func': lambda mask_path, seq: None,
         'skip_condition': None,
-        'process_func': lambda args, img_path: process_mvsec(args, all_img_path),
+        'process_func': lambda args, all_img_path: process_mvsec(args, all_img_path),
     },
     'davis': {
         'img_path': "data/davis/DAVIS/JPEGImages/480p",
